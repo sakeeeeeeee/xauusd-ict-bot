@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Logs
+*.log
+bot_xauusd.log
+
+# Trade history
+trade_history.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/

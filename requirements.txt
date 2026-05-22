@@ -1,0 +1,5 @@
+MetaTrader5>=5.0.45
+pandas>=2.0.0
+requests>=2.28.0
+python-dotenv>=1.0.0
+python-telegram-bot>=21.0
