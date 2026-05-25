@@ -9,9 +9,11 @@ Architecture:
   - Shares state with main engine via `bot_state` dict
   - Signal notifications still use requests.post (sync, thread-safe)
 """
+
 import json
 import logging
 import threading
+import asyncio
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -24,14 +26,24 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from config import (
-    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, SYMBOL, UTC_OFFSET,
-    KILLZONES, MIN_CONFLUENCE_SCORE,
-    MIN_RISK, MAX_RISK, SL_BUFFER,
-    TP1_MULTIPLIER, TP2_MULTIPLIER,
-    MA_FAST_PERIOD, MA_SLOW_PERIOD,
-    SWEEP_LOOKBACK, IFVG_LOOKBACK,
-    SCAN_INTERVAL, SLEEP_OUTSIDE_KZ,
+from src.config import (
+    TELEGRAM_TOKEN,
+    TELEGRAM_CHAT_ID,
+    SYMBOL,
+    UTC_OFFSET,
+    KILLZONES,
+    MIN_CONFLUENCE_SCORE,
+    MIN_RISK,
+    MAX_RISK,
+    SL_BUFFER,
+    TP1_MULTIPLIER,
+    TP2_MULTIPLIER,
+    MA_FAST_PERIOD,
+    MA_SLOW_PERIOD,
+    SWEEP_LOOKBACK,
+    IFVG_LOOKBACK,
+    SCAN_INTERVAL,
+    SLEEP_OUTSIDE_KZ,
 )
 
 logger = logging.getLogger("xauusd_bot")
@@ -57,15 +69,56 @@ bot_state = {
     "market_open": True,
 }
 
+_state_lock = threading.Lock()
+
 # Event for waking up the main scan loop (e.g. on /resume)
 scan_event = threading.Event()
 
 _bot_thread: threading.Thread | None = None
+_bot_app: Application | None = None
+_bot_loop: asyncio.AbstractEventLoop | None = None
+
+
+async def _post_init(app: Application):
+    """Dipanggil PTB saat startup, untuk meng-capture asyncio event loop."""
+    global _bot_loop
+    _bot_loop = asyncio.get_running_loop()
+    logger.debug("Captured PTB asyncio event loop.")
+
+
+# ============================================================
+#  THREAD-SAFE STATE HELPERS
+# ============================================================
+
+
+def get_state(key: str):
+    """Thread-safe read satu key dari bot_state."""
+    with _state_lock:
+        return bot_state[key]
+
+
+def set_state(key: str, value):
+    """Thread-safe write satu key ke bot_state."""
+    with _state_lock:
+        bot_state[key] = value
+
+
+def update_state(data: dict):
+    """Thread-safe batch update bot_state."""
+    with _state_lock:
+        bot_state.update(data)
+
+
+def snapshot_state() -> dict:
+    """Thread-safe copy seluruh bot_state (untuk render text)."""
+    with _state_lock:
+        return dict(bot_state)
 
 
 # ============================================================
 #  HELPERS
 # ============================================================
+
 
 def _wib_now() -> datetime:
     return datetime.now(timezone.utc) + timedelta(hours=UTC_OFFSET)
@@ -76,9 +129,10 @@ def _is_authorized(update: Update) -> bool:
 
 
 def _uptime() -> str:
-    if not bot_state["start_time"]:
+    start = get_state("start_time")
+    if not start:
         return "N/A"
-    delta = datetime.now() - bot_state["start_time"]
+    delta = datetime.now() - start
     h, rem = divmod(int(delta.total_seconds()), 3600)
     m, s = divmod(rem, 60)
     return f"{h}j {m}m {s}d" if h else (f"{m}m {s}d" if m else f"{s}d")
@@ -88,49 +142,57 @@ def _uptime() -> str:
 #  INLINE KEYBOARDS
 # ============================================================
 
+
 def _kb_main() -> InlineKeyboardMarkup:
     pause_btn = (
         InlineKeyboardButton("▶️ Resume", callback_data="resume")
-        if bot_state["paused"]
+        if get_state("paused")
         else InlineKeyboardButton("⏸️ Pause", callback_data="pause")
     )
-    return InlineKeyboardMarkup([
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton("📊 Status", callback_data="status"),
-            InlineKeyboardButton("📈 Bias", callback_data="bias"),
-        ],
-        [
-            InlineKeyboardButton("🎯 Scan Now", callback_data="signal"),
-            InlineKeyboardButton("📋 Stats", callback_data="stats"),
-        ],
-        [
-            InlineKeyboardButton("⚙️ Config", callback_data="config"),
-            pause_btn,
-        ],
-    ])
+            [
+                InlineKeyboardButton("📊 Status", callback_data="status"),
+                InlineKeyboardButton("📈 Bias", callback_data="bias"),
+            ],
+            [
+                InlineKeyboardButton("🎯 Scan Now", callback_data="signal"),
+                InlineKeyboardButton("📋 Stats", callback_data="stats"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ Config", callback_data="config"),
+                pause_btn,
+            ],
+        ]
+    )
 
 
 def _kb_back() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 Menu Utama", callback_data="menu")],
-    ])
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔙 Menu Utama", callback_data="menu")],
+        ]
+    )
 
 
 def _kb_status() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton("🔄 Refresh", callback_data="status"),
-            InlineKeyboardButton("🔙 Menu", callback_data="menu"),
-        ],
-    ])
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data="status"),
+                InlineKeyboardButton("🔙 Menu", callback_data="menu"),
+            ],
+        ]
+    )
 
 
 # ============================================================
 #  RESPONSE TEXT BUILDERS
 # ============================================================
 
+
 def _txt_status() -> str:
-    s = bot_state
+    s = snapshot_state()
     wib = _wib_now().strftime("%H:%M:%S WIB")
     if s["running"] and not s["paused"]:
         st_e, st_t = "🟢", "SCANNING"
@@ -159,7 +221,7 @@ def _txt_status() -> str:
 
 
 def _txt_bias() -> str:
-    s = bot_state
+    s = snapshot_state()
     bias = s["bias"]
     if bias == "BULLISH":
         emoji, desc = "🟢📈", "Price di atas MA Fast & Slow → Trend naik kuat"
@@ -179,7 +241,7 @@ def _txt_bias() -> str:
 
 
 def _txt_signal() -> str:
-    s = bot_state
+    s = snapshot_state()
     c = s["confluence"]
     if c >= 4:
         q = "🟢 STRONG SETUP"
@@ -219,8 +281,8 @@ def _txt_stats() -> str:
         for t in reversed(trades[-3:]):
             e = "🟢" if "BUY" in t.get("side", "") else "🔴"
             recent_lines += (
-                f"  {e} {t.get('side','?')} @ `{t.get('entry','?')}` — "
-                f"{t.get('result','PENDING')}\n"
+                f"  {e} {t.get('side', '?')} @ `{t.get('entry', '?')}` — "
+                f"{t.get('result', 'PENDING')}\n"
             )
         return (
             f"📋 *TRADE STATISTICS*\n{'━' * 22}\n\n"
@@ -255,6 +317,7 @@ def _txt_config() -> str:
 # ============================================================
 #  COMMAND HANDLERS (/command from chat)
 # ============================================================
+
 
 async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
@@ -318,23 +381,25 @@ async def _cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
-    bot_state["paused"] = True
+    set_state("paused", True)
     logger.info("⏸️ Bot PAUSED by user via Telegram.")
     await update.message.reply_text(
         "⏸️ *Bot PAUSED*\n\nScanning dihentikan.\nKetik /resume untuk lanjut.",
-        parse_mode="Markdown", reply_markup=_kb_main(),
+        parse_mode="Markdown",
+        reply_markup=_kb_main(),
     )
 
 
 async def _cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
-    bot_state["paused"] = False
+    set_state("paused", False)
     scan_event.set()
     logger.info("▶️ Bot RESUMED by user via Telegram.")
     await update.message.reply_text(
         "▶️ *Bot RESUMED*\n\nScanning dilanjutkan! 🚀",
-        parse_mode="Markdown", reply_markup=_kb_main(),
+        parse_mode="Markdown",
+        reply_markup=_kb_main(),
     )
 
 
@@ -357,6 +422,7 @@ async def _cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 #  CALLBACK QUERY HANDLER (inline keyboard buttons)
 # ============================================================
+
 
 async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -399,20 +465,21 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _txt_config(), parse_mode="Markdown", reply_markup=_kb_back()
             )
         elif data == "pause":
-            bot_state["paused"] = True
+            set_state("paused", True)
             logger.info("⏸️ Bot PAUSED by user via Telegram.")
             await query.edit_message_text(
-                "⏸️ *Bot PAUSED*\n\nScanning dihentikan.\n"
-                "Tekan ▶️ Resume untuk lanjut.",
-                parse_mode="Markdown", reply_markup=_kb_main(),
+                "⏸️ *Bot PAUSED*\n\nScanning dihentikan.\nTekan ▶️ Resume untuk lanjut.",
+                parse_mode="Markdown",
+                reply_markup=_kb_main(),
             )
         elif data == "resume":
-            bot_state["paused"] = False
+            set_state("paused", False)
             scan_event.set()
             logger.info("▶️ Bot RESUMED by user via Telegram.")
             await query.edit_message_text(
                 "▶️ *Bot RESUMED*\n\nScanning dilanjutkan! 🚀",
-                parse_mode="Markdown", reply_markup=_kb_main(),
+                parse_mode="Markdown",
+                reply_markup=_kb_main(),
             )
     except Exception as e:
         logger.warning(f"Callback error: {e}")
@@ -422,35 +489,57 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  OUTBOUND NOTIFICATIONS (backward compatible, sync)
 # ============================================================
 
+
 def kirim_telegram(pesan: str, timeout: int = 10) -> bool:
     """
-    Kirim pesan ke Telegram (sync, via requests).
-    Returns True jika berhasil, False jika gagal.
+    Kirim pesan ke Telegram.
+    Prioritas utama: gunakan PTB async loop via run_coroutine_threadsafe.
+    Fallback: requests.post (jika PTB loop mati / belum siap).
     """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logger.error("TELEGRAM_TOKEN atau TELEGRAM_CHAT_ID belum diset di .env!")
         return False
 
+    # Jalur Utama: PTB Application bot
+    if _bot_app and _bot_loop and _bot_loop.is_running():
+        try:
+            coro = _bot_app.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=pesan,
+                parse_mode="Markdown",
+                read_timeout=timeout,
+                write_timeout=timeout,
+            )
+            future = asyncio.run_coroutine_threadsafe(coro, _bot_loop)
+            future.result(timeout=timeout + 5)
+            logger.info("Telegram: Pesan terkirim (via PTB async).")
+            return True
+        except Exception as e:
+            logger.warning(
+                f"Telegram PTB Error: {e}. Mencoba fallback requests.post..."
+            )
+            # Fallback ke requests.post jika gagal via PTB
+
+    # Jalur Fallback: requests.post
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": pesan,
         "parse_mode": "Markdown",
     }
-
     try:
         resp = requests.post(url, json=payload, timeout=timeout)
         resp.raise_for_status()
-        logger.info("Telegram: Pesan berhasil terkirim.")
+        logger.info("Telegram: Pesan terkirim (via requests fallback).")
         return True
     except requests.exceptions.Timeout:
-        logger.warning("Telegram: Timeout saat mengirim pesan.")
+        logger.warning("Telegram: Timeout saat mengirim pesan (fallback).")
         return False
     except requests.exceptions.HTTPError as e:
-        logger.error(f"Telegram HTTP Error: {e} | Response: {resp.text}")
+        logger.error(f"Telegram HTTP Error (fallback): {e} | Response: {resp.text}")
         return False
     except Exception as e:
-        logger.error(f"Telegram Error: {e}")
+        logger.error(f"Telegram Error (fallback): {e}")
         return False
 
 
@@ -469,10 +558,13 @@ def kirim_startup_notification():
 #  BOT LIFECYCLE
 # ============================================================
 
+
 def _run_bot():
     """Entry point for the bot polling thread."""
+    global _bot_app
     try:
-        app = Application.builder().token(TELEGRAM_TOKEN).build()
+        app = Application.builder().token(TELEGRAM_TOKEN).post_init(_post_init).build()
+        _bot_app = app
 
         # Command handlers
         app.add_handler(CommandHandler("start", _cmd_start))
@@ -504,8 +596,6 @@ def start_telegram_bot():
         logger.error("Cannot start interactive bot: TELEGRAM_TOKEN/CHAT_ID not set!")
         return
 
-    _bot_thread = threading.Thread(
-        target=_run_bot, daemon=True, name="TelegramBot"
-    )
+    _bot_thread = threading.Thread(target=_run_bot, daemon=True, name="TelegramBot")
     _bot_thread.start()
     logger.info("✅ Telegram interactive bot thread started.")

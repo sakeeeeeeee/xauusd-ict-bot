@@ -2,12 +2,16 @@
 risk_manager.py — Risk Management Module
 SL/TP calculation, risk validation, dan trade logging.
 """
+
 import json
 import logging
 from datetime import datetime
-from config import (
-    MIN_RISK, MAX_RISK, SL_BUFFER,
-    TP1_MULTIPLIER, TP2_MULTIPLIER,
+from src.config import (
+    MIN_RISK,
+    MAX_RISK,
+    SL_BUFFER,
+    TP1_MULTIPLIER,
+    TP2_MULTIPLIER,
 )
 
 logger = logging.getLogger("xauusd_bot")
@@ -22,7 +26,10 @@ def validate_risk(risk: float) -> tuple[bool, str]:
     if risk < MIN_RISK:
         return False, f"Risk terlalu kecil: ${risk:.2f} < ${MIN_RISK} (noise territory)"
     if risk > MAX_RISK:
-        return False, f"Risk terlalu besar: ${risk:.2f} > ${MAX_RISK} (sinyal terlalu jauh)"
+        return (
+            False,
+            f"Risk terlalu besar: ${risk:.2f} > ${MAX_RISK} (sinyal terlalu jauh)",
+        )
     return True, "OK"
 
 
@@ -43,8 +50,12 @@ def calculate_sl_tp(
         sl = round(extreme_price - SL_BUFFER, 2)
         # Safety: jika SL malah di atas entry (karena near-sweep), perbaiki
         if sl >= entry_price:
-            sl = round(entry_price - SL_BUFFER - 1.0, 2)  # Fallback: $1.5 di bawah entry
-            logger.warning(f"SL corrected for BUY: extreme={extreme_price}, new SL={sl}")
+            sl = round(
+                entry_price - SL_BUFFER - 1.0, 2
+            )  # Fallback: $1.5 di bawah entry
+            logger.warning(
+                f"SL corrected for BUY: extreme={extreme_price}, new SL={sl}"
+            )
         risk = abs(entry_price - sl)
         tp1 = round(entry_price + (TP1_MULTIPLIER * risk), 2)
         tp2 = round(entry_price + (TP2_MULTIPLIER * risk), 2)
@@ -54,7 +65,9 @@ def calculate_sl_tp(
         # Safety: jika SL malah di bawah entry, perbaiki
         if sl <= entry_price:
             sl = round(entry_price + SL_BUFFER + 1.0, 2)  # Fallback: $1.5 di atas entry
-            logger.warning(f"SL corrected for SELL: extreme={extreme_price}, new SL={sl}")
+            logger.warning(
+                f"SL corrected for SELL: extreme={extreme_price}, new SL={sl}"
+            )
         risk = abs(entry_price - sl)
         tp1 = round(entry_price - (TP1_MULTIPLIER * risk), 2)
         tp2 = round(entry_price - (TP2_MULTIPLIER * risk), 2)

@@ -3,13 +3,17 @@ analysis.py — ICT Analysis Engine (AGGRESSIVE MODE)
 Sweep detection, IFVG detection, dan HTF Bias detection.
 Near-sweep dan independent IFVG untuk lebih banyak sinyal.
 """
+
 import logging
 import pandas as pd
 import MetaTrader5 as mt5
-from config import (
-    MA_FAST_PERIOD, MA_SLOW_PERIOD,
-    SWEEP_LOOKBACK, SWEEP_CANDLE_WINDOW,
-    NEAR_SWEEP_THRESHOLD, IFVG_LOOKBACK,
+from src.config import (
+    MA_FAST_PERIOD,
+    MA_SLOW_PERIOD,
+    SWEEP_LOOKBACK,
+    SWEEP_CANDLE_WINDOW,
+    NEAR_SWEEP_THRESHOLD,
+    IFVG_LOOKBACK,
 )
 
 logger = logging.getLogger("xauusd_bot")
@@ -18,6 +22,7 @@ logger = logging.getLogger("xauusd_bot")
 # ============================================================
 #  DATA FETCHER
 # ============================================================
+
 
 def get_data(symbol: str, timeframe: int, n: int = 100) -> pd.DataFrame:
     """
@@ -43,6 +48,7 @@ def get_data(symbol: str, timeframe: int, n: int = 100) -> pd.DataFrame:
 # ============================================================
 #  HTF BIAS DETECTION (Multi-Layer MA)
 # ============================================================
+
 
 def detect_robust_bias(df: pd.DataFrame) -> str:
     """
@@ -73,6 +79,7 @@ def detect_robust_bias(df: pd.DataFrame) -> str:
 #  LIQUIDITY SWEEP DETECTION (with Near-Sweep)
 # ============================================================
 
+
 def detect_sweep(df: pd.DataFrame) -> tuple[str, float]:
     """
     Deteksi sweep di N candle terakhir.
@@ -100,7 +107,7 @@ def detect_sweep(df: pd.DataFrame) -> tuple[str, float]:
         # Exact Sweep Buy: Wick tembus low, close kembali di atas
         if candle["low"] < prev_low and candle["close"] > prev_low:
             logger.info(
-                f"SWEEP BUY detected (candle -{1+offset})! "
+                f"SWEEP BUY detected (candle -{1 + offset})! "
                 f"Low={candle['low']:.2f}, PrevLow={prev_low:.2f}"
             )
             return "SWEEP BUY 💧", candle["low"]
@@ -108,7 +115,7 @@ def detect_sweep(df: pd.DataFrame) -> tuple[str, float]:
         # Exact Sweep Sell: Wick tembus high, close kembali di bawah
         if candle["high"] > prev_high and candle["close"] < prev_high:
             logger.info(
-                f"SWEEP SELL detected (candle -{1+offset})! "
+                f"SWEEP SELL detected (candle -{1 + offset})! "
                 f"High={candle['high']:.2f}, PrevHigh={prev_high:.2f}"
             )
             return "SWEEP SELL 💧", candle["high"]
@@ -131,7 +138,7 @@ def detect_sweep(df: pd.DataFrame) -> tuple[str, float]:
         low_distance = abs(prev_low - candle["low"])
         if low_distance <= NEAR_SWEEP_THRESHOLD and candle["close"] > prev_low:
             logger.info(
-                f"NEAR-SWEEP BUY detected (candle -{1+offset})! "
+                f"NEAR-SWEEP BUY detected (candle -{1 + offset})! "
                 f"Low={candle['low']:.2f}, PrevLow={prev_low:.2f}, "
                 f"Distance={low_distance:.2f}"
             )
@@ -141,7 +148,7 @@ def detect_sweep(df: pd.DataFrame) -> tuple[str, float]:
         high_distance = abs(candle["high"] - prev_high)
         if high_distance <= NEAR_SWEEP_THRESHOLD and candle["close"] < prev_high:
             logger.info(
-                f"NEAR-SWEEP SELL detected (candle -{1+offset})! "
+                f"NEAR-SWEEP SELL detected (candle -{1 + offset})! "
                 f"High={candle['high']:.2f}, PrevHigh={prev_high:.2f}, "
                 f"Distance={high_distance:.2f}"
             )
@@ -153,6 +160,7 @@ def detect_sweep(df: pd.DataFrame) -> tuple[str, float]:
 # ============================================================
 #  INVERSED FAIR VALUE GAP (IFVG) DETECTION — INDEPENDENT
 # ============================================================
+
 
 def detect_ifvg(df: pd.DataFrame, sweep_status: str) -> tuple[bool, str]:
     """
@@ -194,6 +202,7 @@ def detect_ifvg(df: pd.DataFrame, sweep_status: str) -> tuple[bool, str]:
 # ============================================================
 #  CONFLUENCE SCORING
 # ============================================================
+
 
 def calculate_confluence(
     side: str,

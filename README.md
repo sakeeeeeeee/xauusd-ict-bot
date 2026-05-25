@@ -82,8 +82,8 @@ TELEGRAM_TOKEN=1234567890:ABCdefGhIJKlmNoPQRsTUVwxyZ
 TELEGRAM_CHAT_ID=-987654321
 ```
 
-### 5. Pengaturan Parameter (`config.py`)
-Anda dapat menyesuaikan parameter strategi pada file `config.py`:
+### 5. Pengaturan Parameter (`src/config.py`)
+Anda dapat menyesuaikan parameter strategi pada file `src/config.py`:
 * `SWEEP_LOOKBACK = 15`: Rentang lilin (candles) untuk mencari swing high/low.
 * `NEAR_SWEEP_THRESHOLD = 1.0`: Nilai toleransi jarak wick dalam USD.
 * `MIN_CONFLUENCE_SCORE = 2`: Batas minimal konfluensi untuk mengirim sinyal.
@@ -96,18 +96,24 @@ Anda dapat menyesuaikan parameter strategi pada file `config.py`:
 ### 1. Jalankan Bot Utama (Scanning Real-Time)
 Pastikan aplikasi MetaTrader 5 Anda sudah terbuka, lalu jalankan perintah:
 ```bash
-python main.py
+python run.py
 ```
 
-### 2. Jalankan Diagnosa Sinyal (Pengujian Logika)
-Untuk menguji semua filter saat ini dan melihat analisis teknikal mendalam secara instan:
-```bash
-python debug_sinyal.py
-```
+### 2. Jalankan Diagnosa Menyeluruh (CLI)
+Anda bisa mengecek koneksi MT5, arah/bias harga, dan detail filter sinyal melalui script diagnostik tunggal:
 
-### 3. Jalankan Cek Arah Pergerakan (Visualisasi Jarak Support/Resistance)
 ```bash
-python debug_arah.py
+# Diagnosa Koneksi MetaTrader 5
+python -m scripts.diagnose --mt5
+
+# Diagnosa Support/Resistance & Jarak Harga
+python -m scripts.diagnose --arah
+
+# Diagnosa Keseluruhan Filter Sinyal
+python -m scripts.diagnose --signal
+
+# Kombinasi
+python -m scripts.diagnose --mt5 --signal --arah
 ```
 
 ---
@@ -116,15 +122,34 @@ python debug_arah.py
 
 ```text
 xauusd-ict-bot/
-├── analysis.py          # Logika pendeteksi Bias H4, Sweep M15, dan IFVG M15
-├── config.py            # Konfigurasi parameter trading, killzone, dan risiko
-├── main.py              # Engine utama & loop scanning sinyal
-├── risk_manager.py      # Penghitung SL/TP, validasi risiko, & trade logging
-├── telegram_bot.py      # Integrasi bot Telegram interaktif (polling)
-├── debug_sinyal.py      # Script diagnostik visual filter sinyal
-├── debug_arah.py        # Script diagnostik jarak Support & Resistance
-├── .gitignore           # File pengabaian Git (mengamankan .env & logs)
-└── requirements.txt     # Daftar pustaka Python yang dibutuhkan
+├── run.py                          # Entry point utama (python run.py)
+├── requirements.txt                # Daftar pustaka Python yang dibutuhkan
+├── .env                            # Kredensial Telegram (tidak di-commit)
+├── .gitignore                      # File pengabaian Git
+│
+├── src/                            # Source code utama
+│   ├── __init__.py
+│   ├── main.py                     # Engine utama & loop scanning sinyal
+│   ├── config.py                   # Konfigurasi parameter trading & risiko
+│   ├── analysis/                   # Modul analisis teknikal
+│   │   ├── __init__.py
+│   │   └── analysis.py             # Deteksi Bias H4, Sweep M15, IFVG M15
+│   ├── risk/                       # Modul manajemen risiko
+│   │   ├── __init__.py
+│   │   └── risk_manager.py         # Penghitung SL/TP, validasi, & trade log
+│   ├── telegram/                   # Modul integrasi Telegram
+│   │   ├── __init__.py
+│   │   └── telegram_bot.py         # Bot Telegram interaktif (polling)
+│   └── mt5/                        # Placeholder untuk abstraksi MT5
+│       └── __init__.py
+│
+├── scripts/                        # Script utilitas & debugging
+│   └── diagnose.py                 # CLI tunggal untuk diagnostik bot (--mt5, --signal, --arah)
+│
+└── tests/                          # Unit tests
+    ├── __init__.py
+    ├── test_analysis.py            # Test logic engine
+    └── test_risk.py                # Test risk management
 ```
 
 ---

@@ -8,49 +8,63 @@ Setup ICT yang dipakai:
   2. Liquidity Sweep (M15) → Entry trigger
   3. Inversed FVG (M15) → Konfirmasi entry
   4. Killzone filter → Hanya trade saat London/NY
-  5. Confluence scoring → Minimum 3/4 untuk kirim sinyal
+  5. Confluence scoring → Minimum 2/4 untuk kirim sinyal
 """
-import time
+
+import sys
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
 
 import MetaTrader5 as mt5
 
-from config import (
-    SYMBOL, UTC_OFFSET,
+from src.config import (
+    SYMBOL,
+    UTC_OFFSET,
     KILLZONES,
     MIN_CONFLUENCE_SCORE,
-    DATA_M15_COUNT, DATA_H4_COUNT,
-    SCAN_INTERVAL, SLEEP_OUTSIDE_KZ, ERROR_SLEEP, WEEKEND_SLEEP,
+    DATA_M15_COUNT,
+    DATA_H4_COUNT,
+    SCAN_INTERVAL,
+    SLEEP_OUTSIDE_KZ,
+    ERROR_SLEEP,
+    WEEKEND_SLEEP,
+    TELEGRAM_TOKEN,
+    TELEGRAM_CHAT_ID,
 )
-from telegram_bot import (
+from src.telegram import (
     kirim_telegram,
     kirim_startup_notification,
     start_telegram_bot,
-    bot_state,
+    get_state,
+    set_state,
+    update_state,
     scan_event,
 )
-from analysis import (
+from src.analysis import (
     get_data,
     detect_robust_bias,
     detect_sweep,
     detect_ifvg,
     calculate_confluence,
 )
-from risk_manager import validate_risk, calculate_sl_tp, log_trade
+from src.risk import validate_risk, calculate_sl_tp, log_trade
 
 
 # ============================================================
 #  LOGGING SETUP
 # ============================================================
 
+
 def setup_logging():
     """Configure logging ke file + console."""
     logger = logging.getLogger("xauusd_bot")
     logger.setLevel(logging.DEBUG)
 
-    # File handler — semua log masuk sini
-    file_handler = logging.FileHandler("bot_xauusd.log", encoding="utf-8")
+    # File handler — rotating, max 5MB x 5 backup
+    file_handler = RotatingFileHandler(
+        "bot_xauusd.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
     file_handler.setLevel(logging.DEBUG)
     file_fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(message)s",
@@ -70,8 +84,80 @@ def setup_logging():
 
 
 # ============================================================
+#  STARTUP VALIDATION
+# ============================================================
+
+
+def validate_startup(logger: logging.Logger) -> bool:
+    """
+    Validasi semua prasyarat sebelum engine loop dimulai.
+    Cek: Telegram credentials, MT5 connection, dan symbol availability.
+    Returns True jika semua OK, False jika ada yang gagal.
+    """
+    all_ok = True
+
+    # --- 1. Cek Telegram credentials ---
+    if not TELEGRAM_TOKEN:
+        logger.critical(
+            "❌ TELEGRAM_TOKEN tidak ditemukan! Pastikan sudah diset di file .env"
+        )
+        all_ok = False
+    else:
+        logger.info("✅ TELEGRAM_TOKEN ditemukan.")
+
+    if not TELEGRAM_CHAT_ID:
+        logger.critical(
+            "❌ TELEGRAM_CHAT_ID tidak ditemukan! Pastikan sudah diset di file .env"
+        )
+        all_ok = False
+    else:
+        logger.info("✅ TELEGRAM_CHAT_ID ditemukan.")
+
+    if not all_ok:
+        logger.critical("Startup GAGAL: Telegram credentials tidak lengkap.")
+        return False
+
+    # --- 2. Cek MT5 initialize ---
+    if not mt5.initialize():
+        error = mt5.last_error()
+        logger.critical(
+            f"❌ MT5 initialization FAILED! "
+            f"Error code: {error[0]}, message: {error[1]}. "
+            f"Pastikan terminal MetaTrader 5 sudah terbuka dan login."
+        )
+        return False
+    logger.info("✅ MT5 initialized successfully.")
+
+    # --- 3. Cek symbol XAUUSD tersedia di Market Watch ---
+    symbol_info = mt5.symbol_info(SYMBOL)
+    if symbol_info is None:
+        logger.critical(
+            f"❌ Symbol '{SYMBOL}' tidak ditemukan di MT5! "
+            f"Pastikan '{SYMBOL}' sudah ditambahkan ke Market Watch."
+        )
+        mt5.shutdown()
+        return False
+
+    if not symbol_info.visible:
+        # Coba aktifkan otomatis
+        if not mt5.symbol_select(SYMBOL, True):
+            logger.critical(
+                f"❌ Gagal mengaktifkan '{SYMBOL}' di Market Watch! "
+                f"Tambahkan manual: klik kanan Market Watch → Show All / Symbols."
+            )
+            mt5.shutdown()
+            return False
+        logger.info(f"✅ Symbol '{SYMBOL}' berhasil diaktifkan di Market Watch.")
+    else:
+        logger.info(f"✅ Symbol '{SYMBOL}' tersedia di Market Watch.")
+
+    return True
+
+
+# ============================================================
 #  MARKET & KILLZONE CHECKS
 # ============================================================
+
 
 def get_wib_now() -> datetime:
     """Get current time in WIB (UTC+7), tidak tergantung timezone sistem."""
@@ -100,6 +186,7 @@ def is_killzone() -> bool:
 #  SIGNAL BUILDER
 # ============================================================
 
+
 def build_signal_message(
     side: str,
     harga: float,
@@ -111,8 +198,8 @@ def build_signal_message(
     confluence: int,
 ) -> str:
     """Format pesan sinyal untuk Telegram."""
-    rr1 = TP1_MULTIPLIER = 2
-    rr2 = TP2_MULTIPLIER = 4
+    rr1 = 2
+    rr2 = 4
     wib_time = get_wib_now().strftime("%H:%M WIB")
 
     return (
@@ -133,6 +220,7 @@ def build_signal_message(
 #  SMART SLEEP (interruptible via scan_event)
 # ============================================================
 
+
 def smart_sleep(seconds: float):
     """Sleep yang bisa di-interrupt oleh scan_event (misal saat /resume)."""
     scan_event.wait(timeout=seconds)
@@ -143,21 +231,20 @@ def smart_sleep(seconds: float):
 #  MAIN ENGINE LOOP
 # ============================================================
 
+
 def run_engine():
     logger = setup_logging()
     logger.info(f"🚀 BOT XAUUSD v2.0 STARTING... (WIB: UTC+{UTC_OFFSET})")
 
-    # Initialize MT5 sekali di awal
-    if not mt5.initialize():
-        logger.critical("❌ MT5 initialization FAILED! Pastikan terminal MT5 terbuka.")
-        return
-
-    logger.info("✅ MT5 connected successfully.")
+    # === STARTUP VALIDATION ===
+    if not validate_startup(logger):
+        logger.critical("🛑 Startup validation GAGAL. Bot tidak bisa jalan.")
+        sys.exit(1)
 
     # === START INTERACTIVE TELEGRAM BOT ===
-    bot_state["mt5_connected"] = True
-    bot_state["start_time"] = datetime.now()
-    bot_state["running"] = True
+    set_state("mt5_connected", True)
+    set_state("start_time", datetime.now())
+    set_state("running", True)
     start_telegram_bot()
 
     kirim_startup_notification()
@@ -169,23 +256,23 @@ def run_engine():
         while True:
             try:
                 # === PAUSE CHECK ===
-                if bot_state["paused"]:
+                if get_state("paused"):
                     logger.debug("⏸️ Bot paused, waiting for resume...")
                     smart_sleep(5)
                     continue
 
                 # === WEEKEND CHECK ===
                 if not is_market_open():
-                    bot_state["market_open"] = False
+                    set_state("market_open", False)
                     logger.info("📅 Weekend — market tutup. Sleeping 1 jam...")
                     smart_sleep(WEEKEND_SLEEP)
                     continue
 
-                bot_state["market_open"] = True
+                set_state("market_open", True)
 
                 # === KILLZONE CHECK ===
                 if not is_killzone():
-                    bot_state["killzone_active"] = False
+                    set_state("killzone_active", False)
                     wib_str = get_wib_now().strftime("%H:%M")
                     logger.info(
                         f"⏸️  [{wib_str}] Outside Killzone. "
@@ -197,14 +284,14 @@ def run_engine():
 
                 # === CHECK MT5 CONNECTION ===
                 if not mt5.terminal_info():
-                    bot_state["mt5_connected"] = False
+                    set_state("mt5_connected", False)
                     logger.warning("MT5 connection lost. Reconnecting...")
                     if not mt5.initialize():
                         logger.error("MT5 reconnection failed!")
                         smart_sleep(ERROR_SLEEP)
                         continue
                     logger.info("MT5 reconnected.")
-                    bot_state["mt5_connected"] = True
+                    set_state("mt5_connected", True)
 
                 # === FETCH DATA ===
                 df_m15 = get_data(SYMBOL, mt5.TIMEFRAME_M15, DATA_M15_COUNT)
@@ -240,20 +327,24 @@ def run_engine():
                 kz_active = is_killzone()
                 confluence = 0
                 if side:
-                    confluence = calculate_confluence(side, bias, sweep_status, ifvg_msg, kz_active)
+                    confluence = calculate_confluence(
+                        side, bias, sweep_status, ifvg_msg, kz_active
+                    )
 
                 # === UPDATE BOT STATE (for Telegram queries) ===
-                bot_state.update({
-                    "bias": bias,
-                    "sweep": sweep_status,
-                    "ifvg": ifvg_msg,
-                    "confluence": confluence,
-                    "price": harga_now,
-                    "killzone_active": kz_active,
-                    "last_scan_time": get_wib_now().strftime("%H:%M:%S WIB"),
-                    "mt5_connected": True,
-                    "market_open": True,
-                })
+                update_state(
+                    {
+                        "bias": bias,
+                        "sweep": sweep_status,
+                        "ifvg": ifvg_msg,
+                        "confluence": confluence,
+                        "price": harga_now,
+                        "killzone_active": kz_active,
+                        "last_scan_time": get_wib_now().strftime("%H:%M:%S WIB"),
+                        "mt5_connected": True,
+                        "market_open": True,
+                    }
+                )
 
                 # === ENTRY LOGIC (AGGRESSIVE & ALIGNED) ===
                 if (
@@ -291,8 +382,9 @@ def run_engine():
                         # KIRIM — hanya lock anti-spam jika BERHASIL terkirim
                         if kirim_telegram(pesan):
                             last_sent_signal_time = current_candle_time
-                            bot_state["last_signal_time"] = (
-                                get_wib_now().strftime("%H:%M:%S WIB")
+                            set_state(
+                                "last_signal_time",
+                                get_wib_now().strftime("%H:%M:%S WIB"),
                             )
                             logger.info(
                                 f"✅ SIGNAL {side} SENT @ {harga_now} "
@@ -332,7 +424,7 @@ def run_engine():
     except KeyboardInterrupt:
         logger.info("Bot dihentikan oleh user (Ctrl+C).")
     finally:
-        bot_state["running"] = False
+        set_state("running", False)
         mt5.shutdown()
         logger.info("MT5 connection closed. Bot stopped.")
 
