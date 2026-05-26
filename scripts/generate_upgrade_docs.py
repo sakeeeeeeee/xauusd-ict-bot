@@ -2,6 +2,7 @@
 Generate Word (.docx) and PDF - VERSI LENGKAP panduan upgrade + semua prompt.
 Run: python scripts/generate_upgrade_docs.py
 """
+
 import sys
 from pathlib import Path
 
@@ -43,7 +44,11 @@ def add_bullet(doc, text):
 def render_sections_to_doc(doc, sections, page_break_before_lampiran=True):
     lampiran_started = False
     for title_text, level, lines in sections:
-        if page_break_before_lampiran and title_text.startswith("LAMPIRAN") and not lampiran_started:
+        if (
+            page_break_before_lampiran
+            and title_text.startswith("LAMPIRAN")
+            and not lampiran_started
+        ):
             doc.add_page_break()
             lampiran_started = True
         add_heading(doc, title_text, level=level)
@@ -65,7 +70,9 @@ def write_docx(all_sections):
     t.alignment = WD_ALIGN_PARAGRAPH.CENTER
     sub = doc.add_paragraph("XAUUSD ICT Signal Bot")
     sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    doc.add_paragraph("Versi LENGKAP: saran upgrade + penjelasan + prompt siap copas (A1-L9)")
+    doc.add_paragraph(
+        "Versi LENGKAP: saran upgrade + penjelasan + prompt siap copas (A1-L9)"
+    )
     doc.add_paragraph("Total prompt item: 70+ | Termasuk batch Fase 1-4")
     doc.add_page_break()
 

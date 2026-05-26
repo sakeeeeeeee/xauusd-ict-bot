@@ -245,7 +245,7 @@ def run_signal_diagnostic():
     else:
         print(" — OK")
 
-    sweep_status, extreme_price = detect_sweep(df_m15)
+    sweep_status, extreme_price, sweep_idx = detect_sweep(df_m15)
     print(f"\n--- SWEEP (M15, window={SWEEP_CANDLE_WINDOW} candle) ---")
     print(f"  Status   : {sweep_status}", end="")
     if sweep_status == "Searching...":
@@ -285,7 +285,7 @@ def run_signal_diagnostic():
     else:
         print(f" — OK! Extreme={extreme_price:.2f}")
 
-    is_ifvg, ifvg_msg = detect_ifvg(df_m15, sweep_status)
+    is_ifvg, ifvg_msg = detect_ifvg(df_m15, sweep_status, sweep_idx)
     print(f"\n--- IFVG (M15, lookback={IFVG_LOOKBACK}) ---")
     print(f"  Status   : {ifvg_msg}", end="")
     if not is_ifvg:

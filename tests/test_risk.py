@@ -53,7 +53,47 @@ def test_calculate_sl_tp_near_sweep_fallback():
 
     # Coba extreme_price = 2001.0
     res = calculate_sl_tp("BUY 🟢", entry_price=2000.0, extreme_price=2001.0)
-    # SL awal = 2001.0 - 0.5 = 2000.5 (Lebih besar dari entry! INVALID SL untuk BUY)
-    # Fallback -> entry - buffer - 1.0 = 2000 - 0.5 - 1.0 = 1998.5
     assert res["sl"] == 1998.5
     assert res["risk"] == 1.5
+
+
+def test_calculate_tp_structural_buy():
+    import pandas as pd
+    from src.risk.risk_manager import calculate_tp_structural
+
+    data = []
+    for i in range(10):
+        data.append({"high": 2010.0, "low": 1990.0})
+    df = pd.DataFrame(data)
+
+    # Entry = 2000, SL = 1995 -> Risk = 5. Fallback 2R = 2010
+    # Jika swing high = 2015 (> 2010), ambil swing high
+    df.loc[5, "high"] = 2015.0
+    tp1 = calculate_tp_structural(df, "BUY 🟢", 2000.0, 1995.0)
+    assert tp1 == 2015.0
+
+    # Jika swing high = 2008 (< 2010), ambil fallback 2010
+    df["high"] = 2008.0
+    tp1 = calculate_tp_structural(df, "BUY 🟢", 2000.0, 1995.0)
+    assert tp1 == 2010.0
+
+
+def test_calculate_tp_structural_sell():
+    import pandas as pd
+    from src.risk.risk_manager import calculate_tp_structural
+
+    data = []
+    for i in range(10):
+        data.append({"high": 2010.0, "low": 1990.0})
+    df = pd.DataFrame(data)
+
+    # Entry = 2000, SL = 2005 -> Risk = 5. Fallback 2R = 1990
+    # Jika swing low = 1985 (< 1990), ambil swing low
+    df.loc[5, "low"] = 1985.0
+    tp1 = calculate_tp_structural(df, "SELL 🔴", 2000.0, 2005.0)
+    assert tp1 == 1985.0
+
+    # Jika swing low = 1992 (> 1990), ambil fallback 1990
+    df["low"] = 1992.0
+    tp1 = calculate_tp_structural(df, "SELL 🔴", 2000.0, 2005.0)
+    assert tp1 == 1990.0

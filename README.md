@@ -50,7 +50,7 @@ graph TD
     F -- Tidak --> A
     G -- Ya --> H
     G -- Tidak --> A
-    H --> I{Confluence >= 2 & Risiko Valid?}
+    H --> I{Confluence >= 3 & Risiko Valid?}
     I -- Ya --> J[Kirim Sinyal BUY/SELL ke Telegram & Catat Riwayat]
     I -- Tidak --> A
 ```
@@ -86,7 +86,9 @@ TELEGRAM_CHAT_ID=-987654321
 Anda dapat menyesuaikan parameter strategi pada file `src/config.py`:
 * `SWEEP_LOOKBACK = 15`: Rentang lilin (candles) untuk mencari swing high/low.
 * `NEAR_SWEEP_THRESHOLD = 1.0`: Nilai toleransi jarak wick dalam USD.
-* `MIN_CONFLUENCE_SCORE = 2`: Batas minimal konfluensi untuk mengirim sinyal.
+* `MIN_CONFLUENCE_SCORE = 3`: Batas minimal konfluensi untuk mengirim sinyal (tier SWING).
+  * **Tier SWING** (default, `= 3`): Hanya sinyal berkualitas tinggi. Akurasi lebih baik.
+  * **Tier AGGRESSIVE** (`= 2`): Sinyal lebih sering, namun potensi *false signal* lebih tinggi.
 * `MIN_RISK` & `MAX_RISK`: Batasan nilai SL dalam USD.
 
 ---

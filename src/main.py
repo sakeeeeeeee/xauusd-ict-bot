@@ -8,10 +8,11 @@ Setup ICT yang dipakai:
   2. Liquidity Sweep (M15) → Entry trigger
   3. Inversed FVG (M15) → Konfirmasi entry
   4. Killzone filter → Hanya trade saat London/NY
-  5. Confluence scoring → Minimum 2/4 untuk kirim sinyal
+  5. Confluence scoring → Minimum 3/4 untuk kirim sinyal (tier SWING)
 """
 
 import sys
+import json
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
@@ -22,7 +23,12 @@ from src.config import (
     SYMBOL,
     UTC_OFFSET,
     KILLZONES,
+    LONDON_NY_KILLZONES,
     MIN_CONFLUENCE_SCORE,
+    MIN_RR,
+    MAX_SPREAD,
+    NEWS_BLACKOUT_MINUTES,
+    NEWS_SCHEDULE_FILE,
     DATA_M15_COUNT,
     DATA_H4_COUNT,
     SCAN_INTERVAL,
@@ -44,9 +50,13 @@ from src.telegram import (
 from src.analysis import (
     get_data,
     detect_robust_bias,
+    detect_premium_discount,
     detect_sweep,
     detect_ifvg,
     calculate_confluence,
+    check_invalidation,
+    get_atr,
+    detect_h4_structure,
 )
 from src.risk import validate_risk, calculate_sl_tp, log_trade
 
@@ -174,12 +184,45 @@ def is_market_open() -> bool:
 
 
 def is_killzone() -> bool:
-    """Cek apakah sekarang masuk killzone session."""
+    """Cek apakah sekarang masuk killzone session (Asia/London/NY)."""
     jam = get_wib_now().hour
     for start, end in KILLZONES:
         if start <= jam < end:
             return True
     return False
+
+
+def is_london_ny_killzone() -> bool:
+    """Cek apakah sekarang masuk killzone London/NY (bukan Asia)."""
+    jam = get_wib_now().hour
+    for start, end in LONDON_NY_KILLZONES:
+        if start <= jam < end:
+            return True
+    return False
+
+
+def is_news_blackout() -> tuple[bool, str]:
+    """Cek apakah waktu saat ini berada di dalam news blackout window"""
+    wib_now = get_wib_now()
+    try:
+        with open(NEWS_SCHEDULE_FILE, "r") as f:
+            news_times = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False, ""
+
+    for nt in news_times:
+        try:
+            hour, minute = map(int, nt.split(":"))
+            news_time = wib_now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            )
+            diff = abs((wib_now - news_time).total_seconds()) / 60.0
+            if diff <= NEWS_BLACKOUT_MINUTES:
+                return True, nt
+        except Exception:
+            continue
+
+    return False, ""
 
 
 # ============================================================
@@ -304,8 +347,15 @@ def run_engine():
 
                 # === ANALYSIS ===
                 bias = detect_robust_bias(df_h4)
-                sweep_status, extreme_price = detect_sweep(df_m15)
-                is_ifvg, ifvg_msg = detect_ifvg(df_m15, sweep_status)
+                pd_zone = detect_premium_discount(df_h4)
+                h4_struct = detect_h4_structure(df_h4)
+                atr = get_atr(df_m15)
+                sweep_status, extreme_price, sweep_idx = detect_sweep(
+                    df_m15,
+                    bias=bias,
+                    is_london_ny_kz=is_london_ny_killzone(),
+                )
+                is_ifvg, ifvg_msg = detect_ifvg(df_m15, sweep_status, sweep_idx)
 
                 harga_now = df_m15["close"].iloc[-1]
                 current_candle_time = df_m15["time"].iloc[-1]
@@ -335,6 +385,8 @@ def run_engine():
                 update_state(
                     {
                         "bias": bias,
+                        "pd_zone": pd_zone,
+                        "h4_struct": h4_struct,
                         "sweep": sweep_status,
                         "ifvg": ifvg_msg,
                         "confluence": confluence,
@@ -353,19 +405,96 @@ def run_engine():
                     and last_sent_signal_time != current_candle_time
                 ):
                     if side:
+                        # NEWS BLACKOUT VALIDATION
+                        in_blackout, nt = is_news_blackout()
+                        if in_blackout:
+                            logger.info(
+                                f"Signal ditolak (News Blackout): Mendekati news rilis {nt} WIB"
+                            )
+                            smart_sleep(SCAN_INTERVAL)
+                            continue
+
+                        # SPREAD VALIDATION
+                        tick = mt5.symbol_info_tick(SYMBOL)
+                        if tick:
+                            spread = tick.ask - tick.bid
+                            if spread > MAX_SPREAD:
+                                logger.info(
+                                    f"Signal ditolak (Spread terlalu besar): {spread:.2f} > {MAX_SPREAD}"
+                                )
+                                smart_sleep(SCAN_INTERVAL)
+                                continue
+
+                        # VALIDASI PREMIUM / DISCOUNT
+                        if side == "BUY 🟢" and pd_zone != "DISCOUNT":
+                            logger.info(
+                                f"Signal BUY ditolak karena berada di {pd_zone} zone (harus DISCOUNT)."
+                            )
+                            smart_sleep(SCAN_INTERVAL)
+                            continue
+                        elif side == "SELL 🔴" and pd_zone != "PREMIUM":
+                            logger.info(
+                                f"Signal SELL ditolak karena berada di {pd_zone} zone (harus PREMIUM)."
+                            )
+                            smart_sleep(SCAN_INTERVAL)
+                            continue
+
+                        # INVALIDATION CHECK
+                        is_invalid, inv_reason = check_invalidation(
+                            df_m15, side, extreme_price
+                        )
+                        if is_invalid:
+                            logger.info(f"Signal ditolak (Invalidation): {inv_reason}")
+                            smart_sleep(SCAN_INTERVAL)
+                            continue
+
                         # RISK VALIDATION
                         raw_risk = abs(harga_now - extreme_price)
-                        is_valid, reason = validate_risk(raw_risk)
+                        is_valid, reason = validate_risk(raw_risk, atr=atr)
                         if not is_valid:
                             logger.info(f"Risk rejected: {reason}")
                             smart_sleep(SCAN_INTERVAL)
                             continue
 
                         # CALCULATE SL/TP
-                        levels = calculate_sl_tp(side, harga_now, extreme_price)
+                        levels = calculate_sl_tp(
+                            side, harga_now, extreme_price, df=df_m15, atr=atr
+                        )
+
+                        # RR VALIDATION (TP1)
+                        if levels["risk"] > 0:
+                            actual_rr = abs(levels["tp1"] - harga_now) / levels["risk"]
+                            if actual_rr < MIN_RR:
+                                logger.info(
+                                    f"Signal ditolak (RR insufficient): "
+                                    f"Risk=${levels['risk']:.2f}, Target=${abs(levels['tp1'] - harga_now):.2f}, "
+                                    f"RR={actual_rr:.2f} < {MIN_RR}"
+                                )
+                                smart_sleep(SCAN_INTERVAL)
+                                continue
 
                         # Confidence label berdasarkan confluence
-                        confidence = "⚡ HIGH" if confluence >= 3 else "📊 MODERATE"
+                        if confluence >= 4:
+                            confidence = "🔥 PERFECT"
+                        elif confluence >= 3:
+                            confidence = "⚡ SWING"
+                        else:
+                            confidence = "📊 AGGRESSIVE"
+
+                        # H4 STRUCTURE VALIDATION (Khusus SWING/PERFECT)
+                        if "SWING" in confidence or "PERFECT" in confidence:
+                            if side == "BUY 🟢" and h4_struct == "BEARISH":
+                                logger.info(
+                                    "Signal BUY ditolak (Structure): Setup SWING tapi H4 Structure BEARISH"
+                                )
+                                smart_sleep(SCAN_INTERVAL)
+                                continue
+                            elif side == "SELL 🔴" and h4_struct == "BULLISH":
+                                logger.info(
+                                    "Signal SELL ditolak (Structure): Setup SWING tapi H4 Structure BULLISH"
+                                )
+                                smart_sleep(SCAN_INTERVAL)
+                                continue
 
                         # BUILD & SEND SIGNAL
                         pesan = build_signal_message(
