@@ -11,6 +11,7 @@ from src.analysis.analysis import (
     get_atr,
     detect_h4_structure,
 )
+from src.analysis.charting import generate_chart
 
 __all__ = [
     "get_data",
@@ -22,4 +23,5 @@ __all__ = [
     "check_invalidation",
     "get_atr",
     "detect_h4_structure",
+    "generate_chart",
 ]

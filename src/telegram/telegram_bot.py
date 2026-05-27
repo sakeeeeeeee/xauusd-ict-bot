@@ -10,12 +10,10 @@ Architecture:
   - Signal notifications still use requests.post (sync, thread-safe)
 """
 
-import json
 import logging
 import threading
 import asyncio
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -27,23 +25,13 @@ from telegram.ext import (
 )
 
 from src.config import (
+    SYMBOLS,
+    RISK_PERCENT, REQUIRE_SWEEP, REQUIRE_IFVG, MIN_RR,
     TELEGRAM_TOKEN,
     TELEGRAM_CHAT_ID,
-    SYMBOL,
     UTC_OFFSET,
-    KILLZONES,
-    MIN_CONFLUENCE_SCORE,
     MIN_RISK,
     MAX_RISK,
-    SL_BUFFER,
-    TP1_MULTIPLIER,
-    TP2_MULTIPLIER,
-    MA_FAST_PERIOD,
-    MA_SLOW_PERIOD,
-    SWEEP_LOOKBACK,
-    IFVG_LOOKBACK,
-    SCAN_INTERVAL,
-    SLEEP_OUTSIDE_KZ,
 )
 
 logger = logging.getLogger("xauusd_bot")
@@ -67,6 +55,11 @@ bot_state = {
     "mt5_connected": False,
     "start_time": None,
     "market_open": True,
+    # health/ops tracking
+    "last_health_ping": None,
+    "mt5_disconnect_time": None,
+    "mt5_disconnect_alert_sent": False,
+    "mt5_reconnect_attempts": 0,
 }
 
 _state_lock = threading.Lock()
@@ -109,10 +102,38 @@ def update_state(data: dict):
         bot_state.update(data)
 
 
+
 def snapshot_state() -> dict:
     """Thread-safe copy seluruh bot_state (untuk render text)."""
     with _state_lock:
-        return dict(bot_state)
+        import copy
+        return copy.deepcopy(bot_state)
+
+
+def update_symbol_state(symbol: str, data: dict):
+    """Thread-safe batch update per-symbol nested state."""
+    with _state_lock:
+        if "symbols" not in bot_state:
+            bot_state["symbols"] = {}
+        if symbol not in bot_state["symbols"]:
+            bot_state["symbols"][symbol] = {}
+        bot_state["symbols"][symbol].update(data)
+
+
+def set_symbol_state(symbol: str, key: str, value):
+    """Thread-safe write satu key di nested symbol state."""
+    with _state_lock:
+        if "symbols" not in bot_state:
+            bot_state["symbols"] = {}
+        if symbol not in bot_state["symbols"]:
+            bot_state["symbols"][symbol] = {}
+        bot_state["symbols"][symbol][key] = value
+
+
+def get_symbol_state(symbol: str, key: str, default=None):
+    """Thread-safe read satu key dari nested symbol state."""
+    with _state_lock:
+        return bot_state.get("symbols", {}).get(symbol, {}).get(key, default)
 
 
 # ============================================================
@@ -194,125 +215,69 @@ def _kb_status() -> InlineKeyboardMarkup:
 def _txt_status() -> str:
     s = snapshot_state()
     wib = _wib_now().strftime("%H:%M:%S WIB")
-    if s["running"] and not s["paused"]:
-        st_e, st_t = "🟢", "SCANNING"
-    elif s["paused"]:
-        st_e, st_t = "🟡", "PAUSED"
-    else:
-        st_e, st_t = "🔴", "STOPPED"
-
-    return (
-        f"📊 *BOT STATUS*\n⏰ {wib}\n{'━' * 22}\n\n"
-        f"{st_e} Engine: *{st_t}*\n"
-        f"{'✅' if s['mt5_connected'] else '❌'} MT5: "
-        f"{'Connected' if s['mt5_connected'] else 'Disconnected'}\n"
-        f"{'🟢' if s['market_open'] else '🔴'} Market: "
-        f"{'Open' if s['market_open'] else 'Closed'}\n"
-        f"{'🟢' if s['killzone_active'] else '⚪'} Killzone: "
-        f"{'Active 🔥' if s['killzone_active'] else 'Inactive'}\n\n"
-        f"💰 {SYMBOL}: `{s['price']}`\n"
-        f"📈 Bias: {s['bias']}\n"
-        f"💧 Sweep: {s['sweep']}\n"
-        f"🧲 IFVG: {s['ifvg']}\n"
-        f"🔗 Confluence: {s['confluence']}/4\n\n"
-        f"⏱️ Uptime: {_uptime()}\n"
-        f"🕐 Last Scan: {s['last_scan_time'] or 'N/A'}"
-    )
+    run_status = "✅ RUNNING" if s.get("running") else "🛑 STOPPED"
+    if s.get("paused"):
+        run_status = "⏸️ PAUSED"
+    mt5_conn = "✅ Connected" if s.get("mt5_connected") else "❌ Disconnected"
+    
+    out = [f"🖥️ *SYSTEM STATUS* ({wib})\n\n🤖 Bot: {run_status}\n🔌 MT5: {mt5_conn}\n"]
+    for sym in SYMBOLS:
+        sym_s = s.get("symbols", {}).get(sym, {})
+        market = "✅ Open" if sym_s.get("market_open") else "😴 Closed"
+        kz = "🔥 Active" if sym_s.get("killzone_active") else "⏳ Waiting"
+        out.append(f"\n🔸 *{sym}*\n🏛️ Market: {market}\n🎯 Killzone: {kz}")
+        out.append(f"⏱️ Last Scan: `{sym_s.get('last_scan_time', 'N/A')}`")
+        out.append(f"📌 Last Signal: `{sym_s.get('last_signal_time', 'N/A')}`")
+    return "\n".join(out)
 
 
 def _txt_bias() -> str:
     s = snapshot_state()
-    bias = s["bias"]
-    if bias == "BULLISH":
-        emoji, desc = "🟢📈", "Price di atas MA Fast & Slow → Trend naik kuat"
-    elif bias == "BEARISH":
-        emoji, desc = "🔴📉", "Price di bawah MA Fast & Slow → Trend turun kuat"
-    elif bias == "RANGING":
-        emoji, desc = "🟡↔️", "Price di antara MA → Tidak ada trend jelas"
-    else:
-        emoji, desc = "❓", "Belum ada data (engine belum scan)"
-    return (
-        f"📈 *MARKET BIAS — H4*\n⏰ {_wib_now().strftime('%H:%M:%S WIB')}\n"
-        f"{'━' * 22}\n\n"
-        f"{emoji} Bias: *{bias}*\n\n💡 {desc}\n\n"
-        f"📊 MA Fast({MA_FAST_PERIOD}) vs Slow({MA_SLOW_PERIOD})\n"
-        f"💰 Price: `{s['price']}`"
-    )
-
+    out = ["📈 *CURRENT BIAS (H4)*"]
+    for sym in SYMBOLS:
+        sym_s = s.get("symbols", {}).get(sym, {})
+        out.append(f"\n🔸 *{sym}*")
+        out.append(f"Direction: `{sym_s.get('bias', 'UNKNOWN')}`")
+        out.append(f"Structure: `{sym_s.get('h4_struct', 'UNKNOWN')}`")
+        out.append(f"PD Zone: `{sym_s.get('pd_zone', 'UNKNOWN')}`")
+    return "\n".join(out)
 
 def _txt_signal() -> str:
     s = snapshot_state()
-    c = s["confluence"]
-    if c >= 4:
-        q = "🟢 STRONG SETUP"
-    elif c >= 3:
-        q = "🟡 VALID SETUP"
-    elif c >= 2:
-        q = "🟠 WEAK"
-    else:
-        q = "🔴 NO SETUP"
-    return (
-        f"🎯 *SCAN RESULT*\n⏰ {_wib_now().strftime('%H:%M:%S WIB')}\n"
-        f"{'━' * 22}\n\n"
-        f"💰 {SYMBOL}: `{s['price']}`\n"
-        f"📈 Bias: {s['bias']}\n💧 Sweep: {s['sweep']}\n"
-        f"🧲 IFVG: {s['ifvg']}\n"
-        f"{'🟢' if s['killzone_active'] else '⚪'} Killzone: "
-        f"{'Active' if s['killzone_active'] else 'Inactive'}\n\n"
-        f"🔗 Confluence: *{c}/4*\n📊 Quality: {q}\n\n"
-        f"_Data dari scan: {s['last_scan_time'] or 'N/A'}_"
-    )
-
+    out = ["🎯 *LAST SIGNAL INFO*"]
+    for sym in SYMBOLS:
+        sym_s = s.get("symbols", {}).get(sym, {})
+        out.append(f"\n🔸 *{sym}*")
+        out.append(f"Sweep: `{sym_s.get('sweep', 'N/A')}`")
+        out.append(f"IFVG: `{sym_s.get('ifvg', 'N/A')}`")
+        out.append(f"Confluence: `{sym_s.get('confluence', 0)}/4`")
+        out.append(f"Price: `{sym_s.get('price', 0.0)}`")
+    return "\n".join(out)
 
 def _txt_stats() -> str:
-    try:
-        fpath = Path("trade_history.json")
-        if not fpath.exists():
-            return "📋 *TRADE STATS*\n\nBelum ada trade yang tercatat."
-        with open(fpath, "r") as f:
-            trades = json.load(f)
-        if not trades:
-            return "📋 *TRADE STATS*\n\nBelum ada trade yang tercatat."
-        total = len(trades)
-        buys = sum(1 for t in trades if "BUY" in t.get("side", ""))
-        sells = sum(1 for t in trades if "SELL" in t.get("side", ""))
-        pending = sum(1 for t in trades if t.get("result") == "PENDING")
-        recent_lines = ""
-        for t in reversed(trades[-3:]):
-            e = "🟢" if "BUY" in t.get("side", "") else "🔴"
-            recent_lines += (
-                f"  {e} {t.get('side', '?')} @ `{t.get('entry', '?')}` — "
-                f"{t.get('result', 'PENDING')}\n"
-            )
-        return (
-            f"📋 *TRADE STATISTICS*\n{'━' * 22}\n\n"
-            f"📊 Total Signals: *{total}*\n"
-            f"🟢 Buy: {buys}  |  🔴 Sell: {sells}\n"
-            f"⏳ Pending: {pending}\n\n"
-            f"📝 *Recent Trades:*\n{recent_lines}"
-        )
-    except Exception as e:
-        return f"📋 *TRADE STATS*\n\n❌ Error: {e}"
-
+    s = snapshot_state()
+    wib = _wib_now().strftime("%H:%M:%S WIB")
+    out = [f"🎯 *SCAN RESULT*\n⏰ {wib}\n" + "━"*22]
+    for sym in SYMBOLS:
+        sym_s = s.get("symbols", {}).get(sym, {})
+        out.append(f"\n🔸 *{sym}*: `{sym_s.get('price', 0)}`")
+        out.append(f"📈 Bias: {sym_s.get('bias', 'N/A')} | 💧 Sweep: {sym_s.get('sweep', 'N/A')}")
+        out.append(f"🧲 IFVG: {sym_s.get('ifvg', 'N/A')} | 🔗 Confluence: {sym_s.get('confluence', 0)}/4")
+    return "\n".join(out)
 
 def _txt_config() -> str:
-    kz = " | ".join(f"{s:02d}:00-{e:02d}:00" for s, e in KILLZONES)
     return (
-        f"⚙️ *KONFIGURASI AKTIF*\n{'━' * 22}\n\n"
-        f"🪙 Symbol: `{SYMBOL}`\n🕐 Timezone: UTC+{UTC_OFFSET} (WIB)\n\n"
+        "⚙️ *KONFIGURASI AKTIF*\n" + "━"*22 + "\n\n"
+        f"🪙 Symbol: `{', '.join(SYMBOLS)}`\n🕐 Timezone: UTC+{UTC_OFFSET} (WIB)\n\n"
         f"*Risk Management:*\n"
         f"  Min Risk: ${MIN_RISK}  |  Max Risk: ${MAX_RISK}\n"
-        f"  SL Buffer: ${SL_BUFFER}\n"
-        f"  TP1: {TP1_MULTIPLIER}R  |  TP2: {TP2_MULTIPLIER}R\n\n"
-        f"*Analysis:*\n"
-        f"  MA Fast: {MA_FAST_PERIOD}  |  Slow: {MA_SLOW_PERIOD}\n"
-        f"  Sweep LB: {SWEEP_LOOKBACK}  |  IFVG LB: {IFVG_LOOKBACK}\n"
-        f"  Min Confluence: {MIN_CONFLUENCE_SCORE}/4\n\n"
-        f"*Timing:*\n"
-        f"  Scan: {SCAN_INTERVAL}s  |  KZ: {kz}\n"
-        f"  Sleep Outside KZ: {SLEEP_OUTSIDE_KZ}s"
+        f"  Risk Per Trade: {RISK_PERCENT * 100}%\n\n"
+        f"*Confluence Requirements:*\n"
+        f"  Sweep: {'✅ Required' if REQUIRE_SWEEP else '❌ Optional'}\n"
+        f"  IFVG: {'✅ Required' if REQUIRE_IFVG else '❌ Optional'}\n"
+        f"  Min Target RR: 1:{MIN_RR}\n\n"
+        f"💡 _Semua pengaturan bisa diubah di config.py_"
     )
-
 
 # ============================================================
 #  COMMAND HANDLERS (/command from chat)
@@ -377,6 +342,29 @@ async def _cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _txt_signal(), parse_mode="Markdown", reply_markup=_kb_back()
     )
 
+
+async def _cmd_lastsignal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    await update.message.reply_text(_txt_signal(), parse_mode="Markdown", reply_markup=_kb_back())
+
+async def _cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    await update.message.reply_text(_txt_stats(), parse_mode="Markdown", reply_markup=_kb_back())
+
+async def _cmd_why(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    s = snapshot_state()
+    wib = _wib_now().strftime("%H:%M:%S WIB")
+    out = [f"🤔 *WHY REJECTED?*\n🕒 {wib}\n\nAlasan penolakan sinyal terakhir:"]
+    for sym in SYMBOLS:
+        sym_s = s.get("symbols", {}).get(sym, {})
+        reason = sym_s.get("last_rejection_reason", "Belum ada penolakan.")
+        out.append(f"🔸 *{sym}*: `{reason}`")
+    
+    await update.message.reply_text("\n".join(out), parse_mode="Markdown", reply_markup=_kb_back())
 
 async def _cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
@@ -554,6 +542,64 @@ def kirim_startup_notification():
     return kirim_telegram(pesan)
 
 
+def kirim_photo(photo_path: str, caption: str = "", timeout: int = 20) -> bool:
+    """Kirim foto ke Telegram via sendPhoto API."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+
+    # Jalur Utama: PTB Application bot
+    if _bot_app and _bot_loop and _bot_loop.is_running():
+        try:
+            with open(photo_path, "rb") as f:
+                coro = _bot_app.bot.send_photo(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    photo=f,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    read_timeout=timeout,
+                    write_timeout=timeout,
+                )
+                future = asyncio.run_coroutine_threadsafe(coro, _bot_loop)
+                future.result(timeout=timeout + 5)
+            logger.info("Telegram: Photo terkirim (via PTB async).")
+            return True
+        except Exception as e:
+            logger.warning(f"Telegram PTB Photo Error: {e}. Mencoba fallback...")
+
+    # Jalur Fallback: requests.post
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    try:
+        with open(photo_path, "rb") as photo:
+            data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "Markdown"}
+            files = {"photo": photo}
+            resp = requests.post(url, data=data, files=files, timeout=timeout)
+            resp.raise_for_status()
+        logger.info("Telegram: Photo terkirim (via requests fallback).")
+        return True
+    except Exception as e:
+        logger.error(f"Gagal kirim photo: {e}")
+        return False
+
+
+# Alias untuk kompatibilitas
+kirim_foto_telegram = kirim_photo
+
+
+def kirim_health_ping():
+    """Kirim health ping status ke Telegram."""
+    start_t = get_state("start_time")
+    from datetime import datetime as _dt
+    uptime = str(_dt.now() - start_t).split('.')[0] if start_t else "Unknown"
+    mt5_conn = "✅ Connected" if get_state("mt5_connected") else "❌ Disconnected"
+
+    kirim_telegram(
+        f"🩺 *Bot Health Ping*\n\n"
+        f"⏳ Uptime: {uptime}\n"
+        f"🖥️ MT5: {mt5_conn}\n\n"
+        f"_Bot is running normally._"
+    )
+
+
 # ============================================================
 #  BOT LIFECYCLE
 # ============================================================
@@ -572,6 +618,9 @@ def _run_bot():
         app.add_handler(CommandHandler("status", _cmd_status))
         app.add_handler(CommandHandler("bias", _cmd_bias))
         app.add_handler(CommandHandler("signal", _cmd_signal))
+        app.add_handler(CommandHandler("lastsignal", _cmd_lastsignal))
+        app.add_handler(CommandHandler("performance", _cmd_performance))
+        app.add_handler(CommandHandler("why", _cmd_why))
         app.add_handler(CommandHandler("pause", _cmd_pause))
         app.add_handler(CommandHandler("resume", _cmd_resume))
         app.add_handler(CommandHandler("stats", _cmd_stats))

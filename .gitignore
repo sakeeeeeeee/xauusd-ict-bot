@@ -8,6 +8,24 @@ bot_xauusd.log
 # Trade history
 trade_history.json
 
+# Database (runtime)
+bot_database.db
+
+# Generated reports
+reports/
+
+# ML artifacts
+model.pkl
+
+# Temp / local dev backups
+current_main.txt
+fix_main.py
+
+# Test & lint caches
+.pytest_cache/
+.ruff_cache/
+pytest-cache-files-*/
+
 # Python
 __pycache__/
 *.pyc

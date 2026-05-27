@@ -3,10 +3,10 @@ risk_manager.py — Risk Management Module
 SL/TP calculation, risk validation, dan trade logging.
 """
 
-import json
 import logging
 import pandas as pd
 from datetime import datetime
+from src.database.db import insert_trade
 from src.config import (
     MIN_RISK,
     MAX_RISK,
@@ -19,7 +19,7 @@ from src.config import (
 )
 
 logger = logging.getLogger("xauusd_bot")
-TRADE_LOG = "trade_history.json"
+# TRADE_LOG = "trade_history.json" # Di-deprecate, pindah ke DB
 
 
 def validate_risk(risk: float, atr: float = 0.0) -> tuple[bool, str]:
@@ -122,11 +122,21 @@ def log_trade(
     risk: float,
     confluence_score: int,
     bias: str,
+    tier: str = "UNKNOWN",
+    session: str = "UNKNOWN",
+    atr: float = 0.0,
+    spread: float = 0.0,
+    near_sweep: bool = False,
+    ifvg_after_sweep: bool = False,
+    ticket1: int = None,
+    ticket2: int = None,
 ):
     """
     Simpan detail trade ke JSON file untuk tracking performa.
+    Backward compatible v2 schema.
     """
     trade = {
+        "version": "v2",
         "time": datetime.now().isoformat(),
         "side": side,
         "entry": entry,
@@ -136,20 +146,19 @@ def log_trade(
         "risk": risk,
         "confluence_score": confluence_score,
         "bias": bias,
+        "tier": tier,
+        "session": session,
+        "atr": atr,
+        "spread": spread,
+        "near_sweep": near_sweep,
+        "ifvg_after_sweep": ifvg_after_sweep,
+        "ticket1": ticket1,
+        "ticket2": ticket2,
         "result": "PENDING",
     }
 
     try:
-        with open(TRADE_LOG, "r") as f:
-            history = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        history = []
-
-    history.append(trade)
-
-    try:
-        with open(TRADE_LOG, "w") as f:
-            json.dump(history, f, indent=2)
-        logger.info(f"Trade logged: {side} @ {entry}")
+        insert_trade(trade)
+        logger.info(f"Trade logged to DB: {side} @ {entry}")
     except Exception as e:
-        logger.error(f"Failed to log trade: {e}")
+        logger.error(f"Failed to log trade to DB: {e}")

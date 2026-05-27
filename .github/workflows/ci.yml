@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest  # WAJIB windows-latest karena MetaTrader5 library hanya support Windows
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: 'pip' # caching pip dependencies
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        # Install pytest-mock if it's not in requirements.txt (berguna untuk mocking MT5 ke depannya)
+        pip install pytest-mock
+
+    - name: Lint with Ruff
+      run: |
+        # Stop the build if there are Python syntax errors or undefined names
+        # Kita panggil ruff dari package manager
+        python -m ruff check src/ tests/ scripts/
+
+    - name: Run Pytest (Mock MT5 interactions)
+      env:
+        CI: true
+      run: |
+        # Menjalankan pytest. Karena tidak ada instance terminal MT5 yang menyala di GitHub Actions,
+        # test suite saat ini (test_analysis, test_risk, test_outcome_tracker) berjalan secara in-memory.
+        # Jika ke depannya ada tes yang mencoba connect ke MT5, gunakan env CI=true untuk skip tes tersebut.
+        pytest tests/ -v

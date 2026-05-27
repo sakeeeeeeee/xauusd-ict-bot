@@ -5,4 +5,9 @@ python-dotenv==1.2.1
 python-telegram-bot==22.7
 pytest==9.0.3
 ruff==0.15.14
- 
+google-generativeai
+matplotlib
+mplfinance
+
+streamlit
+plotly
