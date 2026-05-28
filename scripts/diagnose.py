@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import MetaTrader5 as mt5  # noqa: E402
 from src.config import (  # noqa: E402
-    SYMBOL,
+    SYMBOLS,
     UTC_OFFSET,
     KILLZONES,
     MIN_CONFLUENCE_SCORE,
@@ -136,7 +136,7 @@ def run_arah_diagnostic():
         print(f"MT5 GAGAL: {mt5.last_error()}")
         return
 
-    df = get_data(SYMBOL, mt5.TIMEFRAME_M15, 60)
+    df = get_data(SYMBOLS[0], mt5.TIMEFRAME_M15, 60)
     print("=== Kenapa hanya BUY, bukan SELL? ===\n")
 
     prev_high_global = 0
@@ -215,8 +215,8 @@ def run_signal_diagnostic():
             kz_active = True
     print(f"  Dalam Killzone: {'YA' if kz_active else 'TIDAK — sinyal DIBLOKIR!'}")
 
-    df_m15 = get_data(SYMBOL, mt5.TIMEFRAME_M15, DATA_M15_COUNT)
-    df_h4 = get_data(SYMBOL, mt5.TIMEFRAME_H4, DATA_H4_COUNT)
+    df_m15 = get_data(SYMBOLS[0], mt5.TIMEFRAME_M15, DATA_M15_COUNT)
+    df_h4 = get_data(SYMBOLS[0], mt5.TIMEFRAME_H4, DATA_H4_COUNT)
 
     if df_m15.empty or df_h4.empty:
         print(f"\n[GAGAL] Data kosong! M15={len(df_m15)}, H4={len(df_h4)}")

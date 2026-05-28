@@ -24,23 +24,55 @@ from src.config import (
     MIN_CONFLUENCE_SCALP,
     MIN_CONFLUENCE_SWING,
     UTC_OFFSET,
+    KILLZONES,
+    LONDON_NY_KILLZONES,
+    SESSION_RULES,
 )
 from src.analysis.analysis import (
     get_atr,
     detect_robust_bias,
-    detect_premium_discount,
-    detect_sweep,
-    detect_ifvg,
+    detect_fvg_retest,
     calculate_confluence,
     detect_h4_structure,
     check_invalidation,
 )
-from src.main import (
-    is_killzone,
-    is_london_ny_killzone,
-    is_news_blackout,
-    get_current_session,
-)
+
+
+def get_current_session(current_time: datetime) -> str:
+    jam = current_time.hour
+    if 8 <= jam < 10:
+        return "ASIA"
+    elif 14 <= jam < 17:
+        return "LONDON"
+    elif 19 <= jam < 23:
+        return "NY"
+    return "UNKNOWN"
+
+
+def is_killzone(current_time: datetime = None) -> bool:
+    if not current_time:
+        return False
+    jam = current_time.hour
+    for start, end in KILLZONES:
+        if start <= jam < end:
+            return True
+    return False
+
+
+def is_london_ny_killzone(current_time: datetime = None) -> bool:
+    if not current_time:
+        return False
+    jam = current_time.hour
+    for start, end in LONDON_NY_KILLZONES:
+        if start <= jam < end:
+            return True
+    return False
+
+
+def is_news_blackout(current_time: datetime = None) -> tuple:
+    return False, ""
+
+
 from src.risk.risk_manager import calculate_sl_tp, validate_risk
 from src.risk.outcome_tracker import evaluate_outcomes
 from src.backtest.report import generate_report
@@ -118,7 +150,6 @@ def fetch_historical_data(symbol: str, start: datetime, end: datetime):
     df_h4 = pd.DataFrame(rates_h4)
     df_h4["time"] = pd.to_datetime(df_h4["time"], unit="s")
 
-    mt5.shutdown()
     logger.info(
         f"Loaded {len(df_m5)} M5 candles, {len(df_m15)} M15 candles, {len(df_h4)} H4 candles."
     )
@@ -130,15 +161,27 @@ def run_backtest(
     start_date: datetime,
     end_date: datetime,
     output_file: str = "backtest_results.csv",
+    df_m5: pd.DataFrame = None,
+    df_m15_full: pd.DataFrame = None,
+    df_h4_full: pd.DataFrame = None,
+    quiet: bool = False,
 ):
-    df_m5, df_m15_full, df_h4_full = fetch_historical_data(symbol, start_date, end_date)
-    if df_m5 is None:
-        return
+    if quiet:
+        logger.setLevel(logging.CRITICAL)
+    else:
+        logger.setLevel(logging.INFO)
+
+    if df_m5 is None or df_m15_full is None or df_h4_full is None:
+        df_m5, df_m15_full, df_h4_full = fetch_historical_data(
+            symbol, start_date, end_date
+        )
+        if df_m5 is None:
+            return None
 
     trades = []
     signal_trackers = {
-        "BUY 🟢": {"last_time": None, "last_candle_time": None, "last_extreme": None},
-        "SELL 🔴": {"last_time": None, "last_candle_time": None, "last_extreme": None},
+        "BUY": {"last_time": None, "last_candle_time": None, "last_extreme": None},
+        "SELL": {"last_time": None, "last_candle_time": None, "last_extreme": None},
     }
 
     logger.info("Starting replay loop...")
@@ -183,27 +226,23 @@ def run_backtest(
 
         # ------------------- ANALYSIS -------------------
         bias = detect_robust_bias(df_h4)
-        pd_zone = detect_premium_discount(df_h4)
+        # pd_zone = detect_premium_discount(df_h4)
         _ = detect_h4_structure(df_h4)
         atr = get_atr(df_m15)
 
-        sweep_status, extreme_price, sweep_idx = detect_sweep(
-            df_trigger, bias=bias, is_london_ny_kz=is_london_ny_killzone(current_time)
-        )
-        is_ifvg, ifvg_msg = detect_ifvg(df_trigger, sweep_status, sweep_idx)
+        # 3. Cek FVG Retest
+        fvg_status, extreme_price, fvg_idx = detect_fvg_retest(df_trigger, bias=bias)
 
         side = None
-        if sweep_status == "SWEEP BUY 💧" and ifvg_msg == "IFVG BUY 🧲":
-            side = "BUY 🟢"
-        elif sweep_status == "SWEEP SELL 💧" and ifvg_msg == "IFVG SELL 🧲":
-            side = "SELL 🔴"
+        if "BUY" in fvg_status:
+            side = "BUY"
+        elif "SELL" in fvg_status:
+            side = "SELL"
 
         kz_active = is_killzone(current_time=current_time)
         confluence = 0
         if side:
-            confluence = calculate_confluence(
-                side, bias, sweep_status, ifvg_msg, kz_active
-            )
+            confluence = calculate_confluence(side, bias, fvg_status, kz_active)
 
         # Spam Check & Tier
         tier = None
@@ -229,13 +268,14 @@ def run_backtest(
         # Entry Logic
         if tier and side:
             skip_reason = None
+            session = get_current_session(current_time)
 
             in_blackout, _ = is_news_blackout(current_time)
             if in_blackout:
                 skip_reason = "News Blackout"
 
             if not skip_reason:
-                if not is_killzone(tier, current_time):
+                if session not in SESSION_RULES or tier not in SESSION_RULES[session]:
                     skip_reason = "Tier not allowed in session"
 
             if not skip_reason:
@@ -245,17 +285,14 @@ def run_backtest(
 
             if not skip_reason:
                 levels = calculate_sl_tp(
-                    side, harga_now, extreme_price, df_trigger, atr
+                    side, harga_now, extreme_price, df_trigger, atr, session
                 )
                 is_valid, _ = validate_risk(levels["risk"], atr)
                 if not is_valid:
                     skip_reason = "Risk validation failed"
 
-            if not skip_reason and tier == "SWING":
-                if side == "BUY 🟢" and pd_zone != "DISCOUNT":
-                    skip_reason = "Not DISCOUNT"
-                elif side == "SELL 🔴" and pd_zone != "PREMIUM":
-                    skip_reason = "Not PREMIUM"
+            # HAPUS filter PD Zone karena Silver Bullet murni fokus di FVG Momentum
+            # (Momentum sering kali terbentuk di area Premium untuk Bullish)
 
             if not skip_reason:
                 # Execute Trade
@@ -272,8 +309,8 @@ def run_backtest(
                     session=get_current_session(current_time) or "UNKNOWN",
                     atr=atr,
                     spread=current_spread,
-                    near_sweep="NEAR SWEEP" in sweep_status,
-                    ifvg_after_sweep=is_ifvg,
+                    near_sweep="FVG RETEST",
+                    ifvg_after_sweep=fvg_status,
                     time=current_time,
                 )
                 trades.append(t)
@@ -287,10 +324,17 @@ def run_backtest(
     # Generate Report
     df_trades = pd.DataFrame(trades)
     if not df_trades.empty:
-        generate_report(df_trades)
+        if not quiet:
+            generate_report(df_trades)
 
         df_trades.to_csv(output_file, index=False)
-        logger.info(f"Saved trades to {output_file}")
+        if not quiet:
+            logger.info(f"Saved trades to {output_file}")
+    else:
+        if not quiet:
+            logger.warning(
+                "❌ Tidak ada trade yang memenuhi kriteria strategi selama periode ini. Hasil CSV tidak dibuat."
+            )
 
     return df_trades
 
@@ -306,6 +350,9 @@ if __name__ == "__main__":
     parser.add_argument("--train-end", type=str, help="YYYY-MM-DD")
     parser.add_argument("--test-start", type=str, help="YYYY-MM-DD")
     parser.add_argument("--test-end", type=str, help="YYYY-MM-DD")
+    parser.add_argument(
+        "--days", type=int, default=30, help="Jumlah hari untuk backtest (default: 30)"
+    )
     args = parser.parse_args()
 
     if args.train_start and args.train_end and args.test_start and args.test_end:
@@ -329,5 +376,5 @@ if __name__ == "__main__":
         run_backtest(args.symbol, test_start, test_end, output_file="test_results.csv")
     else:
         end = datetime.now()
-        start = end - timedelta(days=30)
+        start = end - timedelta(days=args.days)
         run_backtest(args.symbol, start, end)

@@ -24,7 +24,7 @@ from src.config import (
     SYMBOL_ALIASES,
     UTC_OFFSET,
     KILLZONES,
-    LONDON_NY_KILLZONES,
+    SESSION_RULES,
     MIN_CONFLUENCE_SCORE,
     MIN_RR,
     MAX_SPREAD,
@@ -54,8 +54,7 @@ from src.analysis import (
     get_data,
     detect_robust_bias,
     detect_premium_discount,
-    detect_sweep,
-    detect_ifvg,
+    detect_fvg_retest,
     calculate_confluence,
     check_invalidation,
     get_atr,
@@ -101,7 +100,6 @@ def setup_logging():
 # ============================================================
 
 
-
 def initialize_mt5_robust(logger: logging.Logger) -> bool:
     """Mencoba initialize MT5 dengan default, lalu path alternatif jika gagal."""
     if mt5.initialize():
@@ -116,6 +114,7 @@ def initialize_mt5_robust(logger: logging.Logger) -> bool:
     )
 
     import os
+
     common_paths = [
         r"C:\Program Files\MetaTrader 5\terminal64.exe",
         r"C:\Program Files (x86)\MetaTrader 5\terminal64.exe",
@@ -180,19 +179,21 @@ def validate_startup(logger: logging.Logger) -> bool:
     for sym in SYMBOLS:
         symbol_info = mt5.symbol_info(sym)
         resolved_sym = sym
-        
+
         if symbol_info is None:
             aliases = SYMBOL_ALIASES.get(sym, [])
             found_alias = False
             for alias in aliases:
                 s_info = mt5.symbol_info(alias)
                 if s_info is not None:
-                    logger.info(f"🔄 Resolving symbol '{sym}' ke alias broker '{alias}'...")
+                    logger.info(
+                        f"🔄 Resolving symbol '{sym}' ke alias broker '{alias}'..."
+                    )
                     resolved_sym = alias
                     symbol_info = s_info
                     found_alias = True
                     break
-            
+
             if not found_alias:
                 logger.critical(
                     f"❌ Symbol '{sym}' (maupun aliasnya) tidak ditemukan di MT5! "
@@ -202,7 +203,9 @@ def validate_startup(logger: logging.Logger) -> bool:
                 return False
 
         if not symbol_info.visible:
-            logger.info(f"🔄 '{resolved_sym}' belum aktif di Market Watch. Mengaktifkan...")
+            logger.info(
+                f"🔄 '{resolved_sym}' belum aktif di Market Watch. Mengaktifkan..."
+            )
             if not mt5.symbol_select(resolved_sym, True):
                 logger.critical(
                     f"❌ Gagal mengaktifkan '{resolved_sym}' di Market Watch! "
@@ -212,9 +215,9 @@ def validate_startup(logger: logging.Logger) -> bool:
             logger.info(f"✅ Symbol '{resolved_sym}' berhasil diaktifkan.")
         else:
             logger.info(f"✅ Symbol '{resolved_sym}' tersedia di Market Watch.")
-            
+
         resolved_symbols.append(resolved_sym)
-        
+
     # Override SYMBOLS dengan nama symbol spesifik broker
     SYMBOLS.clear()
     SYMBOLS.extend(resolved_symbols)
@@ -235,32 +238,32 @@ def get_wib_now() -> datetime:
 def is_market_open(symbol: str) -> bool:
     """Cek apakah market buka untuk symbol tertentu."""
     wib_now = get_wib_now()
-    
+
     if wib_now.weekday() in (5, 6):
         return False
-        
+
     if not mt5.terminal_info():
         return True
-        
+
     symbol_info = mt5.symbol_info(symbol)
     if symbol_info is None:
         return False
-        
+
     if symbol_info.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED:
         return False
-        
+
     tick = mt5.symbol_info_tick(symbol)
     if tick:
         tick_time = datetime.fromtimestamp(tick.time, tz=timezone.utc)
         now_utc = datetime.now(timezone.utc)
         if (now_utc - tick_time).total_seconds() > 1800:  # 30 menit
             return False
-            
+
     return True
 
 
 def is_killzone() -> bool:
-    """Cek apakah sekarang masuk killzone session (Asia/London/NY)."""
+    """Cek apakah waktu saat ini berada di dalam salah satu Killzone."""
     jam = get_wib_now().hour
     for start, end in KILLZONES:
         if start <= jam < end:
@@ -268,13 +271,16 @@ def is_killzone() -> bool:
     return False
 
 
-def is_london_ny_killzone() -> bool:
-    """Cek apakah sekarang masuk killzone London/NY (bukan Asia)."""
+def get_current_session() -> str:
+    """Mengembalikan string sesi aktif berdasarkan waktu."""
     jam = get_wib_now().hour
-    for start, end in LONDON_NY_KILLZONES:
-        if start <= jam < end:
-            return True
-    return False
+    if 8 <= jam < 10:
+        return "ASIA"
+    elif 14 <= jam < 17:
+        return "LONDON"
+    elif 19 <= jam < 23:
+        return "NY"
+    return "UNKNOWN"
 
 
 def is_news_blackout() -> tuple[bool, str]:
@@ -392,11 +398,22 @@ def run_engine():
                     set_state("last_health_ping", last_ping)
                 else:
                     from src.config import HEALTH_PING_INTERVAL_HOURS
-                    if (datetime.now() - last_ping).total_seconds() >= HEALTH_PING_INTERVAL_HOURS * 3600:
+
+                    if (
+                        datetime.now() - last_ping
+                    ).total_seconds() >= HEALTH_PING_INTERVAL_HOURS * 3600:
                         start_t = get_state("start_time")
-                        uptime = str(datetime.now() - start_t).split('.')[0] if start_t else "Unknown"
-                        mt5_conn = "✅ Connected" if get_state("mt5_connected") else "❌ Disconnected"
-                        
+                        uptime = (
+                            str(datetime.now() - start_t).split(".")[0]
+                            if start_t
+                            else "Unknown"
+                        )
+                        mt5_conn = (
+                            "✅ Connected"
+                            if get_state("mt5_connected")
+                            else "❌ Disconnected"
+                        )
+
                         kirim_telegram(
                             f"🩺 *Bot Health Ping*\n\n"
                             f"⏳ Uptime: {uptime}\n"
@@ -412,7 +429,7 @@ def run_engine():
                 # === CHECK MT5 CONNECTION ===
                 if not mt5.terminal_info():
                     set_state("mt5_connected", False)
-                    
+
                     disc_time = get_state("mt5_disconnect_time")
                     if not disc_time:
                         set_state("mt5_disconnect_time", datetime.now())
@@ -429,17 +446,23 @@ def run_engine():
                     reconnect_attempts = get_state("mt5_reconnect_attempts") or 0
                     reconnect_attempts += 1
                     set_state("mt5_reconnect_attempts", reconnect_attempts)
-                    
-                    logger.warning(f"MT5 connection lost. Reconnecting... (Attempt {reconnect_attempts})")
+
+                    logger.warning(
+                        f"MT5 connection lost. Reconnecting... (Attempt {reconnect_attempts})"
+                    )
                     if not initialize_mt5_robust(logger):
                         # Exponential backoff: min 5s, max 300s
                         backoff = min(5 * (2 ** (reconnect_attempts - 1)), 300)
-                        logger.error(f"MT5 reconnection failed! Backing off for {backoff}s...")
+                        logger.error(
+                            f"MT5 reconnection failed! Backing off for {backoff}s..."
+                        )
                         smart_sleep(backoff)
                         continue
-                        
+
                     if get_state("mt5_disconnect_alert_sent"):
-                        kirim_telegram("✅ *RESOLVED: MT5 Reconnected!*\n\nKoneksi MetaTrader 5 telah pulih.")
+                        kirim_telegram(
+                            "✅ *RESOLVED: MT5 Reconnected!*\n\nKoneksi MetaTrader 5 telah pulih."
+                        )
                     set_state("mt5_disconnect_time", None)
                     set_state("mt5_disconnect_alert_sent", False)
                     set_state("mt5_reconnect_attempts", 0)
@@ -473,59 +496,70 @@ def run_engine():
                     pd_zone = detect_premium_discount(df_h4)
                     h4_struct = detect_h4_structure(df_h4)
                     atr = get_atr(df_m15)
-                    sweep_status, extreme_price, sweep_idx = detect_sweep(
-                        df_m15,
-                        bias=bias,
-                        is_london_ny_kz=is_london_ny_killzone(),
+
+                    # FVG Retest Detection
+                    fvg_status, extreme_price, fvg_idx = detect_fvg_retest(
+                        df_m15, bias=bias
                     )
-                    is_ifvg, ifvg_msg = detect_ifvg(df_m15, sweep_status, sweep_idx)
 
                     harga_now = df_m15["close"].iloc[-1]
                     current_candle_time = df_m15["time"].iloc[-1]
+                    session = get_current_session()
 
-                    # === DETERMINE TRADE SIDE & DIRECTION ALIGNMENT ===
+                    # === DETERMINE TRADE SIDE ===
                     side = None
-                    if sweep_status == "SWEEP BUY 💧" and ifvg_msg == "IFVG BUY 🧲":
-                        side = "BUY 🟢"
-                    elif sweep_status == "SWEEP SELL 💧" and ifvg_msg == "IFVG SELL 🧲":
-                        side = "SELL 🔴"
-                    else:
-                        if "SWEEP" in sweep_status:
-                            logger.debug(
-                                f"Setup rejected due to mismatched or missing IFVG: "
-                                f"Sweep={sweep_status}, IFVG={ifvg_msg}"
+                    if "BUY" in fvg_status:
+                        side = "BUY"
+                    elif "SELL" in fvg_status:
+                        side = "SELL"
+
+                    # Filter based on SESSION_RULES
+                    if side:
+                        allowed_tiers = SESSION_RULES.get(session, [])
+                        # Our silver bullet is basically the "SWING" tier equivalent
+                        if "SWING" not in allowed_tiers:
+                            logger.info(
+                                f"Signal {side} rejected: SWING not allowed in {session} session."
                             )
+                            set_symbol_state(
+                                sym,
+                                "last_rejection_reason",
+                                f"Not allowed in {session}",
+                            )
+                            side = None
 
                     # === CONFLUENCE CHECK ===
                     kz_active = is_killzone()
                     confluence = 0
                     if side:
                         confluence = calculate_confluence(
-                            side, bias, sweep_status, ifvg_msg, kz_active
+                            side, bias, fvg_status, kz_active
                         )
 
                     # === UPDATE BOT STATE (for Telegram queries) ===
-                    update_symbol_state(sym,
+                    update_symbol_state(
+                        sym,
                         {
                             "bias": bias,
                             "pd_zone": pd_zone,
                             "h4_struct": h4_struct,
-                            "sweep": sweep_status,
-                            "ifvg": ifvg_msg,
+                            "sweep": fvg_status,  # reuse sweep property for display
+                            "ifvg": session,  # reuse ifvg property for display
                             "confluence": confluence,
                             "price": harga_now,
                             "killzone_active": kz_active,
                             "last_scan_time": get_wib_now().strftime("%H:%M:%S WIB"),
                             "mt5_connected": True,
                             "market_open": True,
-                        }
+                        },
                     )
 
                     # === ENTRY LOGIC (AGGRESSIVE & ALIGNED) ===
                     if (
                         side
                         and confluence >= MIN_CONFLUENCE_SCORE
-                        and signal_trackers[sym][side.split()[0]]["last_candle_time"] != current_candle_time
+                        and signal_trackers[sym][side.split()[0]]["last_candle_time"]
+                        != current_candle_time
                     ):
                         if side:
                             # NEWS BLACKOUT VALIDATION
@@ -534,7 +568,9 @@ def run_engine():
                                 logger.info(
                                     f"Signal ditolak (News Blackout): Mendekati news rilis {nt} WIB"
                                 )
-                                set_symbol_state(sym, "last_rejection_reason", "News Blackout")
+                                set_symbol_state(
+                                    sym, "last_rejection_reason", "News Blackout"
+                                )
                                 continue
 
                             # SPREAD VALIDATION
@@ -545,21 +581,33 @@ def run_engine():
                                     logger.info(
                                         f"Signal ditolak (Spread terlalu besar): {spread:.2f} > {MAX_SPREAD}"
                                     )
-                                    set_symbol_state(sym, "last_rejection_reason", "Spread terlalu besar")
+                                    set_symbol_state(
+                                        sym,
+                                        "last_rejection_reason",
+                                        "Spread terlalu besar",
+                                    )
                                     continue
 
                             # VALIDASI PREMIUM / DISCOUNT
-                            if side == "BUY 🟢" and pd_zone != "DISCOUNT":
+                            if side == "BUY" and pd_zone != "DISCOUNT":
                                 logger.info(
                                     f"Signal BUY ditolak karena berada di {pd_zone} zone (harus DISCOUNT)."
                                 )
-                                set_symbol_state(sym, "last_rejection_reason", "Bukan Discount Zone (BUY)")
+                                set_symbol_state(
+                                    sym,
+                                    "last_rejection_reason",
+                                    "Bukan Discount Zone (BUY)",
+                                )
                                 continue
-                            elif side == "SELL 🔴" and pd_zone != "PREMIUM":
+                            elif side == "SELL" and pd_zone != "PREMIUM":
                                 logger.info(
                                     f"Signal SELL ditolak karena berada di {pd_zone} zone (harus PREMIUM)."
                                 )
-                                set_symbol_state(sym, "last_rejection_reason", "Bukan Premium Zone (SELL)")
+                                set_symbol_state(
+                                    sym,
+                                    "last_rejection_reason",
+                                    "Bukan Premium Zone (SELL)",
+                                )
                                 continue
 
                             # INVALIDATION CHECK
@@ -567,8 +615,14 @@ def run_engine():
                                 df_m15, side, extreme_price
                             )
                             if is_invalid:
-                                logger.info(f"Signal ditolak (Invalidation): {inv_reason}")
-                                set_symbol_state(sym, "last_rejection_reason", "Invalidation (misal Wick/Close salah)")
+                                logger.info(
+                                    f"Signal ditolak (Invalidation): {inv_reason}"
+                                )
+                                set_symbol_state(
+                                    sym,
+                                    "last_rejection_reason",
+                                    "Invalidation (misal Wick/Close salah)",
+                                )
                                 continue
 
                             # RISK VALIDATION
@@ -576,47 +630,70 @@ def run_engine():
                             is_valid, reason = validate_risk(raw_risk, atr=atr)
                             if not is_valid:
                                 logger.info(f"Risk rejected: {reason}")
-                                set_symbol_state(sym, "last_rejection_reason", "Risk to Reward atau SL terlalu besar/kecil")
+                                set_symbol_state(
+                                    sym,
+                                    "last_rejection_reason",
+                                    "Risk to Reward atau SL terlalu besar/kecil",
+                                )
                                 continue
 
                             # CALCULATE SL/TP
                             levels = calculate_sl_tp(
-                                side, harga_now, extreme_price, df=df_m15, atr=atr
+                                side,
+                                harga_now,
+                                extreme_price,
+                                df=df_m15,
+                                atr=atr,
+                                session=session,
                             )
 
                             # RR VALIDATION (TP1)
                             if levels["risk"] > 0:
-                                actual_rr = abs(levels["tp1"] - harga_now) / levels["risk"]
+                                actual_rr = (
+                                    abs(levels["tp1"] - harga_now) / levels["risk"]
+                                )
                                 if actual_rr < MIN_RR:
                                     logger.info(
                                         f"Signal ditolak (RR insufficient): "
                                         f"Risk=${levels['risk']:.2f}, Target=${abs(levels['tp1'] - harga_now):.2f}, "
                                         f"RR={actual_rr:.2f} < {MIN_RR}"
                                     )
-                                    set_symbol_state(sym, "last_rejection_reason", "RR tidak mencapai Minimum (1:1.5)")
+                                    set_symbol_state(
+                                        sym,
+                                        "last_rejection_reason",
+                                        "RR tidak mencapai Minimum (1:1.5)",
+                                    )
                                     continue
 
                             # Confidence label berdasarkan confluence
-                            if confluence >= 4:
+                            if confluence >= 3:
                                 confidence = "🔥 PERFECT"
-                            elif confluence >= 3:
+                            elif confluence >= 2:
                                 confidence = "⚡ SWING"
                             else:
                                 confidence = "📊 AGGRESSIVE"
 
                             # H4 STRUCTURE VALIDATION (Khusus SWING/PERFECT)
                             if "SWING" in confidence or "PERFECT" in confidence:
-                                if side == "BUY 🟢" and h4_struct == "BEARISH":
+                                if side == "BUY" and h4_struct == "BEARISH":
                                     logger.info(
                                         "Signal BUY ditolak (Structure): Setup SWING tapi H4 Structure BEARISH"
                                     )
-                                    set_symbol_state(sym, "last_rejection_reason", "H4 Structure Bearish (Setup Swing BUY)")
+                                    set_symbol_state(
+                                        sym,
+                                        "last_rejection_reason",
+                                        "H4 Structure Bearish (Setup Swing BUY)",
+                                    )
                                     continue
-                                elif side == "SELL 🔴" and h4_struct == "BULLISH":
+                                elif side == "SELL" and h4_struct == "BULLISH":
                                     logger.info(
                                         "Signal SELL ditolak (Structure): Setup SWING tapi H4 Structure BULLISH"
                                     )
-                                    set_symbol_state(sym, "last_rejection_reason", "H4 Structure Bullish (Setup Swing SELL)")
+                                    set_symbol_state(
+                                        sym,
+                                        "last_rejection_reason",
+                                        "H4 Structure Bullish (Setup Swing SELL)",
+                                    )
                                     continue
 
                             # BUILD & SEND SIGNAL
@@ -633,16 +710,19 @@ def run_engine():
 
                             # KIRIM — hanya lock anti-spam jika BERHASIL terkirim
                             if kirim_telegram(pesan):
-                                signal_trackers[sym][side.split()[0]]["last_candle_time"] = current_candle_time
-                                set_symbol_state(sym,
+                                signal_trackers[sym][side.split()[0]][
+                                    "last_candle_time"
+                                ] = current_candle_time
+                                set_symbol_state(
+                                    sym,
                                     "last_signal_time",
                                     get_wib_now().strftime("%H:%M:%S WIB"),
                                 )
                                 logger.info(
                                     f"✅ SIGNAL {side} SENT @ {harga_now} "
-                                    f"[{confidence}] Confluence={confluence}/4"
+                                    f"[{confidence}] Confluence={confluence}/3"
                                 )
-                                
+
                                 # KIRIM CHART JIKA ENABLED
                                 if CHART_ENABLED:
                                     chart_path = "generate_chart.png"
@@ -654,9 +734,12 @@ def run_engine():
                                             sl_price=levels["sl"],
                                             tp1_price=levels["tp1"],
                                             tp2_price=levels["tp2"],
-                                            save_path=chart_path
+                                            save_path=chart_path,
                                         )
-                                        kirim_photo(chart_path, caption=f"📊 Chart {sym} M15 ({confidence})")
+                                        kirim_photo(
+                                            chart_path,
+                                            caption=f"📊 Chart {sym} M15 ({confidence})",
+                                        )
                                     except Exception as ce:
                                         logger.error(f"Gagal kirim chart: {ce}")
 
@@ -672,14 +755,16 @@ def run_engine():
                                     bias=bias,
                                 )
                             else:
-                                logger.warning("⚠️ Signal gagal terkirim, akan dicoba lagi.")
+                                logger.warning(
+                                    "⚠️ Signal gagal terkirim, akan dicoba lagi."
+                                )
 
                     # STATUS LOG (visible di console supaya user tau bot jalan)
                     wib_str = get_wib_now().strftime("%H:%M:%S")
                     logger.info(
                         f"🔍 [{wib_str}] {sym} | Bias: {bias} | "
-                        f"Sweep: {sweep_status} | IFVG: {ifvg_msg} | "
-                        f"Confluence: {confluence}/4"
+                        f"FVG: {fvg_status} | Session: {session} | "
+                        f"Confluence: {confluence}/3"
                     )
 
                 smart_sleep(SCAN_INTERVAL)
@@ -692,6 +777,7 @@ def run_engine():
 
     except KeyboardInterrupt:
         logger.info("Bot dihentikan oleh user (Ctrl+C).")
+        kirim_telegram("🛑 *SISTEM OFFLINE*\n\nBot XAUUSD telah dimatikan secara manual (Ctrl+C).")
     finally:
         set_state("running", False)
         mt5.shutdown()

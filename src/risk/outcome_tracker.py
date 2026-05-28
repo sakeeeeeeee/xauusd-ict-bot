@@ -111,6 +111,8 @@ def update_outcomes(df_trigger: pd.DataFrame) -> list[dict]:
             try:
                 update_trade_result_by_id(t["id"], t["result"], pnl)
             except Exception as e:
-                logger.error(f"Failed to update trade outcome to DB for trade ID {t.get('id')}: {e}")
+                logger.error(
+                    f"Failed to update trade outcome to DB for trade ID {t.get('id')}: {e}"
+                )
 
     return updated_trades

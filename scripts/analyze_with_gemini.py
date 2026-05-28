@@ -31,13 +31,14 @@ logger = logging.getLogger("gemini_analyzer")
 
 from src.database.db import get_all_trades
 
+
 def load_trade_data() -> pd.DataFrame | None:
     try:
         trades = get_all_trades()
         if not trades:
             logger.error("Data trade kosong di database.")
             return None
-        
+
         df = pd.DataFrame(trades)
         if df.empty:
             return None

@@ -18,6 +18,7 @@ from src.backtest.report import calculate_r
 
 from src.database.db import get_all_trades
 
+
 def load_trade_history():
     try:
         trades = get_all_trades()

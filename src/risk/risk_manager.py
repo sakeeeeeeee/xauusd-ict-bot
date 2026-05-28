@@ -16,6 +16,7 @@ from src.config import (
     ATR_MIN_RISK_MULT,
     ATR_MAX_RISK_MULT,
     ATR_SL_BUFFER_MULT,
+    SESSION_SETTINGS,
 )
 
 logger = logging.getLogger("xauusd_bot")
@@ -45,7 +46,7 @@ def validate_risk(risk: float, atr: float = 0.0) -> tuple[bool, str]:
 
 
 def calculate_tp_structural(
-    df: pd.DataFrame, side: str, entry: float, sl: float
+    df: pd.DataFrame, side: str, entry: float, sl: float, session: str = "UNKNOWN"
 ) -> float:
     """
     Hitung TP1 berdasarkan struktur terdekat (Swing High untuk BUY, Swing Low untuk SELL).
@@ -53,15 +54,20 @@ def calculate_tp_structural(
     """
     risk = abs(entry - sl)
 
+    # Ambil TP1_MULTIPLIER per sesi jika ada, kalau tidak gunakan global
+    current_tp1_mult = TP1_MULTIPLIER
+    if session in SESSION_SETTINGS and "TP1_MULTIPLIER" in SESSION_SETTINGS[session]:
+        current_tp1_mult = SESSION_SETTINGS[session]["TP1_MULTIPLIER"]
+
     if "BUY" in side:
-        fallback_tp1 = entry + (TP1_MULTIPLIER * risk)
+        fallback_tp1 = entry + (current_tp1_mult * risk)
         if df is not None and not df.empty:
             recent_high = df["high"].max()
             if recent_high > fallback_tp1:
                 return round(recent_high, 2)
         return round(fallback_tp1, 2)
     else:
-        fallback_tp1 = entry - (TP1_MULTIPLIER * risk)
+        fallback_tp1 = entry - (current_tp1_mult * risk)
         if df is not None and not df.empty:
             recent_low = df["low"].min()
             if recent_low < fallback_tp1:
@@ -75,6 +81,7 @@ def calculate_sl_tp(
     extreme_price: float,
     df: pd.DataFrame = None,
     atr: float = 0.0,
+    session: str = "UNKNOWN",
 ) -> dict:
     """
     Hitung SL (dengan buffer) dan TP.
@@ -82,7 +89,15 @@ def calculate_sl_tp(
     TP2 tetap menggunakan default multiplier (misal 4R).
     Buffer SL menggunakan kelipatan ATR jika atr > 0, sebaliknya fallback ke default.
     """
-    current_sl_buffer = (atr * ATR_SL_BUFFER_MULT) if atr > 0 else SL_BUFFER
+    # Ambil ATR_SL_BUFFER_MULT per sesi jika ada, kalau tidak gunakan global
+    current_atr_sl_mult = ATR_SL_BUFFER_MULT
+    if (
+        session in SESSION_SETTINGS
+        and "ATR_SL_BUFFER_MULT" in SESSION_SETTINGS[session]
+    ):
+        current_atr_sl_mult = SESSION_SETTINGS[session]["ATR_SL_BUFFER_MULT"]
+
+    current_sl_buffer = (atr * current_atr_sl_mult) if atr > 0 else SL_BUFFER
 
     if "BUY" in side:
         sl = round(extreme_price - current_sl_buffer, 2)
@@ -92,7 +107,7 @@ def calculate_sl_tp(
                 f"SL corrected for BUY: extreme={extreme_price}, new SL={sl}"
             )
         risk = abs(entry_price - sl)
-        tp1 = calculate_tp_structural(df, side, entry_price, sl)
+        tp1 = calculate_tp_structural(df, side, entry_price, sl, session)
         tp2 = round(entry_price + (TP2_MULTIPLIER * risk), 2)
     else:
         sl = round(extreme_price + current_sl_buffer, 2)
@@ -102,7 +117,7 @@ def calculate_sl_tp(
                 f"SL corrected for SELL: extreme={extreme_price}, new SL={sl}"
             )
         risk = abs(entry_price - sl)
-        tp1 = calculate_tp_structural(df, side, entry_price, sl)
+        tp1 = calculate_tp_structural(df, side, entry_price, sl, session)
         tp2 = round(entry_price - (TP2_MULTIPLIER * risk), 2)
 
     return {

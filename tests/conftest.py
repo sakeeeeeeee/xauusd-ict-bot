@@ -1,10 +1,12 @@
 import os
 import pytest
 
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "mt5: mark test that requires a live MetaTrader 5 connection"
     )
+
 
 def pytest_collection_modifyitems(config, items):
     if os.environ.get("CI") == "true":

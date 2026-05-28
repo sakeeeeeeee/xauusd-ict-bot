@@ -1,11 +1,13 @@
 """
 charting.py - Utility to generate trade visualization charts.
 """
+
 import pandas as pd
 import mplfinance as mpf
 import logging
 
 logger = logging.getLogger("xauusd_bot")
+
 
 def generate_trade_chart(
     df: pd.DataFrame,
@@ -29,33 +31,45 @@ def generate_trade_chart(
 
         # Ambil maksimal 50 bar terakhir agar chart terlihat proporsional
         plot_df = df.tail(50).copy()
-        
+
         # Pastikan kolom sesuai format mplfinance
-        col_map = {c: c.capitalize() for c in plot_df.columns if c.lower() in ['open', 'high', 'low', 'close', 'tick_volume', 'real_volume', 'volume']}
+        col_map = {
+            c: c.capitalize()
+            for c in plot_df.columns
+            if c.lower()
+            in ["open", "high", "low", "close", "tick_volume", "real_volume", "volume"]
+        }
         plot_df.rename(columns=col_map, inplace=True)
-        
+
         if not isinstance(plot_df.index, pd.DatetimeIndex):
             plot_df.index = pd.to_datetime(plot_df.index)
 
         hline_levels = [sl, entry, tp1, tp2]
-        hline_colors = ['r', 'b', 'g', 'g']
-        hline_styles = ['--', '-', '--', '-.']
-        
+        hline_colors = ["r", "b", "g", "g"]
+        hline_styles = ["--", "-", "--", "-."]
+
         # Style kustom yang bersih
-        mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', edge='inherit', wick='inherit')
-        s  = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=True)
-        
+        mc = mpf.make_marketcolors(
+            up="#26a69a", down="#ef5350", edge="inherit", wick="inherit"
+        )
+        s = mpf.make_mpf_style(marketcolors=mc, gridstyle=":", y_on_right=True)
+
         title = f"{symbol} {side} Setup"
-        
+
         mpf.plot(
             plot_df,
-            type='candle',
+            type="candle",
             style=s,
-            hlines=dict(hlines=hline_levels, colors=hline_colors, linestyle=hline_styles, linewidths=1.5),
+            hlines=dict(
+                hlines=hline_levels,
+                colors=hline_colors,
+                linestyle=hline_styles,
+                linewidths=1.5,
+            ),
             title=title,
             savefig=output_path,
             tight_layout=True,
-            figsize=(10, 6)
+            figsize=(10, 6),
         )
         return output_path
     except Exception as e:

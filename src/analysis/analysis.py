@@ -10,11 +10,6 @@ import MetaTrader5 as mt5
 from src.config import (
     MA_FAST_PERIOD,
     MA_SLOW_PERIOD,
-    SWEEP_LOOKBACK,
-    SWEEP_CANDLE_WINDOW,
-    NEAR_SWEEP_THRESHOLD,
-    NEAR_SWEEP_ENABLED,
-    IFVG_AFTER_SWEEP_WINDOW,
 )
 
 logger = logging.getLogger("xauusd_bot")
@@ -33,11 +28,11 @@ def get_data(symbol: str, timeframe: int, n: int = 100) -> pd.DataFrame:
     """
     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, n)
 
-    if rates is None or len(rates) < max(MA_SLOW_PERIOD + 1, SWEEP_LOOKBACK + 1):
+    if rates is None or len(rates) < MA_SLOW_PERIOD + 1:
         logger.warning(
             f"Data tidak cukup untuk {symbol} TF={timeframe}. "
             f"Got {len(rates) if rates is not None else 0} candles, "
-            f"butuh minimal {max(MA_SLOW_PERIOD + 1, SWEEP_LOOKBACK + 1)}."
+            f"butuh minimal {MA_SLOW_PERIOD + 1}."
         )
         return pd.DataFrame()
 
@@ -186,191 +181,81 @@ def detect_premium_discount(df: pd.DataFrame, period: int = 50) -> str:
 
 
 # ============================================================
-#  LIQUIDITY SWEEP DETECTION (with conditional Near-Sweep)
+#  FAIR VALUE GAP (FVG) RETEST DETECTION (SILVER BULLET)
 # ============================================================
 
 
-def detect_sweep(
+def detect_fvg_retest(
     df: pd.DataFrame,
     bias: str = "",
-    is_london_ny_kz: bool = False,
 ) -> tuple[str, float, int]:
     """
-    Deteksi sweep di N candle terakhir.
+    Mendeteksi FVG murni dan apakah harga saat ini sedang me-retest FVG tersebut.
+    Hanya mengembalikan sinyal jika searah dengan bias H4.
 
-    PASS 1 (exact sweep): Selalu aktif — wick tembus level + close rejection.
-    PASS 2 (near-sweep):  Hanya aktif jika NEAR_SWEEP_ENABLED=True,
-                          sedang di killzone London/NY, dan bias H4 searah.
-
-    Returns: (status_string, extreme_price, sweep_candle_index)
-             sweep_candle_index = -1 jika tidak ada sweep.
+    Returns: (status_string, extreme_price, fvg_candle_index)
+             fvg_candle_index = -1 jika tidak ada.
     """
-    if df.empty or len(df) < SWEEP_LOOKBACK + SWEEP_CANDLE_WINDOW:
+    if df.empty or len(df) < 15:
         return "Searching...", 0.0, -1
 
-    # === PASS 1: Cari exact sweep dulu ===
-    for offset in range(SWEEP_CANDLE_WINDOW):
-        idx = -(1 + offset)
-        candle = df.iloc[idx]
+    last_idx = len(df) - 1
 
-        lb_end = len(df) + idx
-        lb_start = lb_end - SWEEP_LOOKBACK
-        if lb_start < 0:
-            continue
-        lookback = df.iloc[lb_start:lb_end]
+    # Kita mundur mencari FVG yang terbentuk maksimal 15 candle terakhir
+    # i adalah index untuk candle ke-3 dari formasi FVG
+    for i in range(last_idx - 1, last_idx - 15, -1):
+        c1 = df.iloc[i - 2]
+        # c2 = df.iloc[i - 1] # Unused
+        c3 = df.iloc[i]
 
-        prev_high = lookback["high"].max()
-        prev_low = lookback["low"].min()
+        # Bullish FVG: C3 Low > C1 High
+        if c3["low"] > c1["high"]:
+            gap_top = c3["low"]
+            gap_bottom = c1["high"]
 
-        # Exact Sweep Buy: Wick tembus low, close kembali di atas
-        if candle["low"] < prev_low and candle["close"] > prev_low:
-            abs_idx = len(df) - 1 - offset
-            logger.info(
-                f"SWEEP BUY detected (candle -{1 + offset}, idx={abs_idx})! "
-                f"Low={candle['low']:.2f}, PrevLow={prev_low:.2f}"
-            )
-            return "SWEEP BUY 💧", candle["low"], abs_idx
+            # Cek apakah gap masih valid (belum diclose di bawah gap_bottom)
+            is_valid = True
+            retested = False
+            for j in range(i + 1, len(df)):
+                test_candle = df.iloc[j]
+                if test_candle["close"] < gap_bottom:
+                    is_valid = False
+                    break
+                # Cek apakah harga sudah masuk ke dalam gap (retest)
+                if test_candle["low"] <= gap_top:
+                    retested = True
 
-        # Exact Sweep Sell: Wick tembus high, close kembali di bawah
-        if candle["high"] > prev_high and candle["close"] < prev_high:
-            abs_idx = len(df) - 1 - offset
-            logger.info(
-                f"SWEEP SELL detected (candle -{1 + offset}, idx={abs_idx})! "
-                f"High={candle['high']:.2f}, PrevHigh={prev_high:.2f}"
-            )
-            return "SWEEP SELL 💧", candle["high"], abs_idx
+            # Sinyal valid jika gap belum jebol, sudah diretest, dan bias searah
+            if is_valid and retested and bias == "BULLISH":
+                logger.info(
+                    f"FVG BUY Retest detected! Gap: {gap_bottom:.2f} - {gap_top:.2f}"
+                )
+                # SL diletakkan di bawah C1 (awal pergerakan impulsif)
+                return "FVG BUY", c1["low"], i
 
-    # === PASS 2: Near-sweep (gated) ===
-    # Syarat: NEAR_SWEEP_ENABLED + London/NY killzone + bias searah
-    if not NEAR_SWEEP_ENABLED:
-        return "Searching...", 0.0, -1
+        # Bearish FVG: C3 High < C1 Low
+        if c3["high"] < c1["low"]:
+            gap_top = c1["low"]
+            gap_bottom = c3["high"]
 
-    if not is_london_ny_kz:
-        logger.debug("Near-sweep skipped: bukan London/NY killzone.")
-        return "Searching...", 0.0, -1
+            is_valid = True
+            retested = False
+            for j in range(i + 1, len(df)):
+                test_candle = df.iloc[j]
+                if test_candle["close"] > gap_top:
+                    is_valid = False
+                    break
+                if test_candle["high"] >= gap_bottom:
+                    retested = True
 
-    for offset in range(SWEEP_CANDLE_WINDOW):
-        idx = -(1 + offset)
-        candle = df.iloc[idx]
-
-        lb_end = len(df) + idx
-        lb_start = lb_end - SWEEP_LOOKBACK
-        if lb_start < 0:
-            continue
-        lookback = df.iloc[lb_start:lb_end]
-
-        prev_high = lookback["high"].max()
-        prev_low = lookback["low"].min()
-
-        # Near-Sweep Buy: hanya jika bias BULLISH
-        low_distance = abs(prev_low - candle["low"])
-        if (
-            bias == "BULLISH"
-            and low_distance <= NEAR_SWEEP_THRESHOLD
-            and candle["close"] > prev_low
-        ):
-            abs_idx = len(df) - 1 - offset
-            logger.info(
-                f"NEAR-SWEEP BUY detected (candle -{1 + offset}, idx={abs_idx})! "
-                f"Low={candle['low']:.2f}, PrevLow={prev_low:.2f}, "
-                f"Distance={low_distance:.2f}"
-            )
-            return "SWEEP BUY 💧", candle["low"], abs_idx
-
-        # Near-Sweep Sell: hanya jika bias BEARISH
-        high_distance = abs(candle["high"] - prev_high)
-        if (
-            bias == "BEARISH"
-            and high_distance <= NEAR_SWEEP_THRESHOLD
-            and candle["close"] < prev_high
-        ):
-            abs_idx = len(df) - 1 - offset
-            logger.info(
-                f"NEAR-SWEEP SELL detected (candle -{1 + offset}, idx={abs_idx})! "
-                f"High={candle['high']:.2f}, PrevHigh={prev_high:.2f}, "
-                f"Distance={high_distance:.2f}"
-            )
-            return "SWEEP SELL 💧", candle["high"], abs_idx
+            if is_valid and retested and bias == "BEARISH":
+                logger.info(
+                    f"FVG SELL Retest detected! Gap: {gap_bottom:.2f} - {gap_top:.2f}"
+                )
+                # SL diletakkan di atas C1
+                return "FVG SELL", c1["high"], i
 
     return "Searching...", 0.0, -1
-
-
-# ============================================================
-#  INVERSED FAIR VALUE GAP (IFVG) DETECTION — SWEEP-ANCHORED
-# ============================================================
-
-
-def detect_ifvg(
-    df: pd.DataFrame,
-    sweep_status: str,
-    sweep_idx: int = -1,
-) -> tuple[bool, str]:
-    """
-    Deteksi Inversed FVG yang terbentuk dalam IFVG_AFTER_SWEEP_WINDOW candle
-    setelah candle sweep. IFVG harus searah sweep.
-
-    Returns: (is_ifvg_found, message_or_reason)
-    """
-    # Gate 1: harus ada sweep terlebih dahulu
-    if sweep_idx < 0 or sweep_status == "Searching...":
-        return False, "No IFVG — belum ada sweep"
-
-    # Gate 2: tentukan arah yang dicari berdasarkan sweep
-    if "BUY" in sweep_status:
-        target_direction = "BUY"
-    elif "SELL" in sweep_status:
-        target_direction = "SELL"
-    else:
-        return False, "No IFVG — arah sweep tidak dikenali"
-
-    # Gate 3: data cukup?
-    if len(df) < 5:
-        return False, "No IFVG — data tidak cukup"
-
-    last_close = df["close"].iloc[-1]
-
-    # Window: scan FVG hanya di candle sweep_idx sampai sweep_idx + IFVG_AFTER_SWEEP_WINDOW
-    scan_start = sweep_idx
-    scan_end = min(
-        sweep_idx + IFVG_AFTER_SWEEP_WINDOW, len(df) - 2
-    )  # -2 karena butuh i+2
-
-    if scan_start >= scan_end:
-        return False, f"No IFVG — window kosong (sweep di candle {sweep_idx})"
-
-    # Scan BACKWARDS (dari terbaru ke terlama) dalam window
-    for i in range(scan_end - 1, scan_start - 1, -1):
-        if i + 2 >= len(df):
-            continue
-
-        c1_low = df["low"].iloc[i]
-        c1_high = df["high"].iloc[i]
-        c3_low = df["low"].iloc[i + 2]
-        c3_high = df["high"].iloc[i + 2]
-
-        # Bearish FVG (gap down): C1_Low > C3_High
-        # IFVG BUY = price inverse kembali ke ATAS melewati C1_Low
-        if target_direction == "BUY" and c1_low > c3_high and last_close > c1_low:
-            logger.info(
-                f"IFVG BUY found at candle index {i} "
-                f"(sweep@{sweep_idx}, window={IFVG_AFTER_SWEEP_WINDOW})"
-            )
-            return True, "IFVG BUY 🧲"
-
-        # Bullish FVG (gap up): C1_High < C3_Low
-        # IFVG SELL = price inverse kembali ke BAWAH melewati C1_High
-        if target_direction == "SELL" and c1_high < c3_low and last_close < c1_high:
-            logger.info(
-                f"IFVG SELL found at candle index {i} "
-                f"(sweep@{sweep_idx}, window={IFVG_AFTER_SWEEP_WINDOW})"
-            )
-            return True, "IFVG SELL 🧲"
-
-    return (
-        False,
-        f"No IFVG — tidak ditemukan IFVG {target_direction} dalam "
-        f"{IFVG_AFTER_SWEEP_WINDOW} candle setelah sweep (idx {sweep_idx})",
-    )
 
 
 # ============================================================
@@ -381,35 +266,27 @@ def detect_ifvg(
 def calculate_confluence(
     side: str,
     bias: str,
-    sweep_status: str,
-    ifvg_msg: str,
+    fvg_status: str,
     is_killzone_active: bool,
 ) -> int:
     """
-    Hitung score konfluensi yang ter-align dengan arah trade.
-    Max score = 4.
-    Semakin tinggi, semakin kuat setup.
+    Hitung score konfluensi untuk Silver Bullet.
+    Max score = 3 (Killzone + Bias + FVG).
     """
     score = 0
     if is_killzone_active:
         score += 1
 
-    # Bias alignment (tier SWING: hanya exact match, RANGING = 0 poin)
-    if side == "BUY 🟢" and bias == "BULLISH":
+    # Bias alignment
+    if side == "BUY" and bias == "BULLISH":
         score += 1
-    elif side == "SELL 🔴" and bias == "BEARISH":
-        score += 1
-
-    # Sweep alignment
-    if side == "BUY 🟢" and "BUY" in sweep_status:
-        score += 1
-    elif side == "SELL 🔴" and "SELL" in sweep_status:
+    elif side == "SELL" and bias == "BEARISH":
         score += 1
 
-    # IFVG alignment
-    if side == "BUY 🟢" and "BUY" in ifvg_msg:
+    # FVG alignment
+    if side == "BUY" and "BUY" in fvg_status:
         score += 1
-    elif side == "SELL 🔴" and "SELL" in ifvg_msg:
+    elif side == "SELL" and "SELL" in fvg_status:
         score += 1
 
     return score
@@ -435,13 +312,13 @@ def check_invalidation(
 
     last_close = df["close"].iloc[-1]
 
-    if side == "BUY 🟢":
+    if side == "BUY":
         if last_close < extreme_price:
             return (
                 True,
                 f"Close terakhir ({last_close:.2f}) di bawah Sweep Low ({extreme_price:.2f})",
             )
-    elif side == "SELL 🔴":
+    elif side == "SELL":
         if last_close > extreme_price:
             return (
                 True,

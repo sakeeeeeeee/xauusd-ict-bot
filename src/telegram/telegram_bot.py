@@ -26,7 +26,8 @@ from telegram.ext import (
 
 from src.config import (
     SYMBOLS,
-    RISK_PERCENT, REQUIRE_SWEEP, REQUIRE_IFVG, MIN_RR,
+    RISK_PERCENT,
+    MIN_RR,
     TELEGRAM_TOKEN,
     TELEGRAM_CHAT_ID,
     UTC_OFFSET,
@@ -102,11 +103,11 @@ def update_state(data: dict):
         bot_state.update(data)
 
 
-
 def snapshot_state() -> dict:
     """Thread-safe copy seluruh bot_state (untuk render text)."""
     with _state_lock:
         import copy
+
         return copy.deepcopy(bot_state)
 
 
@@ -219,7 +220,7 @@ def _txt_status() -> str:
     if s.get("paused"):
         run_status = "⏸️ PAUSED"
     mt5_conn = "✅ Connected" if s.get("mt5_connected") else "❌ Disconnected"
-    
+
     out = [f"🖥️ *SYSTEM STATUS* ({wib})\n\n🤖 Bot: {run_status}\n🔌 MT5: {mt5_conn}\n"]
     for sym in SYMBOLS:
         sym_s = s.get("symbols", {}).get(sym, {})
@@ -242,42 +243,48 @@ def _txt_bias() -> str:
         out.append(f"PD Zone: `{sym_s.get('pd_zone', 'UNKNOWN')}`")
     return "\n".join(out)
 
+
 def _txt_signal() -> str:
     s = snapshot_state()
     out = ["🎯 *LAST SIGNAL INFO*"]
     for sym in SYMBOLS:
         sym_s = s.get("symbols", {}).get(sym, {})
         out.append(f"\n🔸 *{sym}*")
-        out.append(f"Sweep: `{sym_s.get('sweep', 'N/A')}`")
-        out.append(f"IFVG: `{sym_s.get('ifvg', 'N/A')}`")
-        out.append(f"Confluence: `{sym_s.get('confluence', 0)}/4`")
+        out.append(f"FVG Retest: `{sym_s.get('sweep', 'N/A')}`")
+        out.append(f"Session: `{sym_s.get('ifvg', 'N/A')}`")
+        out.append(f"Confluence: `{sym_s.get('confluence', 0)}/3`")
         out.append(f"Price: `{sym_s.get('price', 0.0)}`")
     return "\n".join(out)
+
 
 def _txt_stats() -> str:
     s = snapshot_state()
     wib = _wib_now().strftime("%H:%M:%S WIB")
-    out = [f"🎯 *SCAN RESULT*\n⏰ {wib}\n" + "━"*22]
+    out = [f"🎯 *SCAN RESULT*\n⏰ {wib}\n" + "━" * 22]
     for sym in SYMBOLS:
         sym_s = s.get("symbols", {}).get(sym, {})
         out.append(f"\n🔸 *{sym}*: `{sym_s.get('price', 0)}`")
-        out.append(f"📈 Bias: {sym_s.get('bias', 'N/A')} | 💧 Sweep: {sym_s.get('sweep', 'N/A')}")
-        out.append(f"🧲 IFVG: {sym_s.get('ifvg', 'N/A')} | 🔗 Confluence: {sym_s.get('confluence', 0)}/4")
+        out.append(
+            f"📈 Bias: {sym_s.get('bias', 'N/A')} | 💧 FVG: {sym_s.get('sweep', 'N/A')}"
+        )
+        out.append(
+            f"🧲 Session: {sym_s.get('ifvg', 'N/A')} | 🔗 Confluence: {sym_s.get('confluence', 0)}/3"
+        )
     return "\n".join(out)
+
 
 def _txt_config() -> str:
     return (
-        "⚙️ *KONFIGURASI AKTIF*\n" + "━"*22 + "\n\n"
+        "⚙️ *KONFIGURASI AKTIF*\n" + "━" * 22 + "\n\n"
         f"🪙 Symbol: `{', '.join(SYMBOLS)}`\n🕐 Timezone: UTC+{UTC_OFFSET} (WIB)\n\n"
         f"*Risk Management:*\n"
         f"  Min Risk: ${MIN_RISK}  |  Max Risk: ${MAX_RISK}\n"
         f"  Risk Per Trade: {RISK_PERCENT * 100}%\n\n"
         f"*Confluence Requirements:*\n"
-        f"  Sweep: {'✅ Required' if REQUIRE_SWEEP else '❌ Optional'}\n"
-        f"  IFVG: {'✅ Required' if REQUIRE_IFVG else '❌ Optional'}\n"
         f"  Min Target RR: 1:{MIN_RR}\n\n"
         f"💡 _Semua pengaturan bisa diubah di config.py_"
     )
+
 
 # ============================================================
 #  COMMAND HANDLERS (/command from chat)
@@ -346,12 +353,18 @@ async def _cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _cmd_lastsignal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
-    await update.message.reply_text(_txt_signal(), parse_mode="Markdown", reply_markup=_kb_back())
+    await update.message.reply_text(
+        _txt_signal(), parse_mode="Markdown", reply_markup=_kb_back()
+    )
+
 
 async def _cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
-    await update.message.reply_text(_txt_stats(), parse_mode="Markdown", reply_markup=_kb_back())
+    await update.message.reply_text(
+        _txt_stats(), parse_mode="Markdown", reply_markup=_kb_back()
+    )
+
 
 async def _cmd_why(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
@@ -363,8 +376,11 @@ async def _cmd_why(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sym_s = s.get("symbols", {}).get(sym, {})
         reason = sym_s.get("last_rejection_reason", "Belum ada penolakan.")
         out.append(f"🔸 *{sym}*: `{reason}`")
-    
-    await update.message.reply_text("\n".join(out), parse_mode="Markdown", reply_markup=_kb_back())
+
+    await update.message.reply_text(
+        "\n".join(out), parse_mode="Markdown", reply_markup=_kb_back()
+    )
+
 
 async def _cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
@@ -570,7 +586,11 @@ def kirim_photo(photo_path: str, caption: str = "", timeout: int = 20) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     try:
         with open(photo_path, "rb") as photo:
-            data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "Markdown"}
+            data = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": caption,
+                "parse_mode": "Markdown",
+            }
             files = {"photo": photo}
             resp = requests.post(url, data=data, files=files, timeout=timeout)
             resp.raise_for_status()
@@ -589,7 +609,8 @@ def kirim_health_ping():
     """Kirim health ping status ke Telegram."""
     start_t = get_state("start_time")
     from datetime import datetime as _dt
-    uptime = str(_dt.now() - start_t).split('.')[0] if start_t else "Unknown"
+
+    uptime = str(_dt.now() - start_t).split(".")[0] if start_t else "Unknown"
     mt5_conn = "✅ Connected" if get_state("mt5_connected") else "❌ Disconnected"
 
     kirim_telegram(
