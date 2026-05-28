@@ -1,6 +1,6 @@
-# 🎯 XAUUSD ICT Trading Signal Bot (v2.0 - Aggressive & Aligned)
+# 🎯 XAUUSD ICT Trading Signal Bot (v3.0 - Pure Silver Bullet FVG)
 
-Bot trading otomatis berbasis Python yang diintegrasikan langsung dengan **MetaTrader 5 (MT5)** dan **Telegram** untuk melakukan pemindaian (scanning) sinyal trading presisi tinggi pada pasangan mata uang **XAUUSD (Gold)** menggunakan konsep **ICT (Inner Circle Trader)**.
+Bot trading otomatis berbasis Python yang diintegrasikan langsung dengan **MetaTrader 5 (MT5)** dan **Telegram** untuk melakukan pemindaian (scanning) sinyal trading presisi tinggi pada pasangan mata uang **XAUUSD (Gold)** menggunakan konsep **ICT (Inner Circle Trader) Silver Bullet**.
 
 ---
 
@@ -10,62 +10,52 @@ Bot trading otomatis berbasis Python yang diintegrasikan langsung dengan **MetaT
    * Menggunakan **Dual Moving Average** (MA Fast & MA Slow) pada Timeframe H4.
    * Menyaring arah perdagangan agar selalu selaras dengan tren pasar yang dominan (`BULLISH`, `BEARISH`, atau `RANGING`).
 
-2. **Deteksi Likuiditas (M15 Liquidity Sweep & Near-Sweep):**
-   * Mencari pembersihan likuiditas (*liquidity sweep*) pada level puncak (*swing high*) dan dasar (*swing low*) dalam rentang waktu yang dinamis.
-   * Dilengkapi fitur **Near-Sweep** dengan toleransi threshold ($1.0) dan validasi harga penutupan (*close price rejection*) untuk menghindari sinyal *breakout* palsu.
+2. **Deteksi FVG Retest (Silver Bullet Momentum):**
+   * Berfokus murni pada pergerakan momentum yang menciptakan **Fair Value Gap (FVG)**.
+   * Menunggu harga kembali untuk me-retest FVG tersebut sebelum memberikan sinyal, mengikuti algoritma ICT Silver Bullet klasik.
 
-3. **Konfirmasi Struktur (Inversed Fair Value Gap - IFVG):**
-   * Menggunakan **Inversed FVG (IFVG)** pada timeframe M15 sebagai konfirmasi entri yang valid.
-   * Pemindaian dilakukan secara mundur (*backwards-scanning*) untuk memprioritaskan FVG terbaru dan tersegar (*fresh IFVG*).
+3. **Filter Waktu Sesi (Killzone Session):**
+   * Hanya melakukan pemindaian dan eksekusi pada jam-jam pasar berlikuiditas tinggi: **Sesi London** (dan **New York** jika diaktifkan).
+   * Mencegah perdagangan pada sesi Asia yang rentan terhadap *whipsaw*.
 
-4. **Filter Waktu Sesi (Killzone Session):**
-   * Hanya melakukan pemindaian dan eksekusi pada jam-jam pasar aktif berlikuiditas tinggi: **Sesi Asia**, **Sesi London**, dan **Sesi New York (WIB)**.
-
-5. **Manajemen Risiko Cerdas (Smart Risk Manager):**
+4. **Manajemen Risiko Cerdas (Smart Risk Manager):**
    * Otomatis menghitung rasio **Risk to Reward (R:R)** yang ideal.
-   * Menentukan level **Stop Loss (SL)** dengan buffer pengaman, serta **Take Profit 1 (2R)** dan **Take Profit 2 (4R)**.
-   * Validasi risiko batas minimum ($1.50) dan maksimum ($15.00) untuk mencegah *noise* pasar atau jarak entri yang terlalu jauh.
-   * Koreksi SL otomatis (*self-correcting SL*) jika harga sudah bergerak melampaui titik ekstrem.
+   * Menentukan level **Stop Loss (SL)** dinamis berdasarkan ATR dan struktur harga (*Swing High/Low*).
+   * Validasi risiko batas minimum dan maksimum untuk mencegah kerugian konyol saat volatilitas menggila.
 
-6. **Telegram Bot Interaktif & Dashboard:**
+5. **Telegram Bot Interaktif & Dashboard:**
    * Pengiriman sinyal instan lengkap dengan grafik detail harga entri, SL, TP1, TP2, nilai risiko, bias tren, dan skor konfluensi.
-   * Fitur interaktif via `/start`, `/pause`, `/resume`, `/performance`, `/why`, `/lastsignal`.
-   * **Dashboard Streamlit** mandiri terpisah untuk melihat analitik dan *win rate* riwayat trade via SQLite.
+   * Fitur interaktif via perintah Telegram (`/status`, `/config`, `/stats`).
+   * **Dashboard Streamlit** mandiri terpisah untuk melihat analitik dan *win rate* riwayat trade secara visual.
 
 ---
 
 ## 📐 Arsitektur Sistem (Dual Tier Architecture)
 
-Bot ini menggunakan **Arsitektur Dual-Tier (Dua Lapisan)** untuk memisahkan proses logika yang berat dari proses pengiriman notifikasi/antarmuka (UI):
-1. **Tier 1: Core Engine (`main.py`)** berjalan di *main thread*. Tugasnya murni melakukan *heavy-lifting*: koneksi ke MT5, *fetching* data *tick/candle*, menjalankan algoritma deteksi ICT, validasi sinyal, dan menyimpan ke SQLite (`bot_database.db`).
-2. **Tier 2: Telegram Interface (`telegram_bot.py`)** berjalan secara asinkron (async) di *background thread*. Tugasnya mem-polling perintah Telegram (seperti `/status`, `/why`), mengambil data dari `bot_state` di memori via *Thread Lock*, dan membalas *user* tanpa menghalangi (blocking) proses *scan* di Tier 1.
+Bot ini menggunakan **Arsitektur Dual-Tier (Dua Lapisan)** untuk memisahkan proses logika dari UI:
+1. **Tier 1: Core Engine (`main.py`)** berjalan di *main thread*. Tugasnya murni melakukan *heavy-lifting*: koneksi ke MT5, menarik data *tick/candle*, menjalankan algoritma deteksi FVG, dan menyimpan *trade* ke SQLite (`bot_database.db`).
+2. **Tier 2: Telegram Interface (`telegram_bot.py`)** berjalan secara asinkron di *background thread*. Membalas *user* tanpa menghalangi (blocking) proses *scan* di Tier 1.
 
 ```mermaid
 graph TD
-    A[Start Scan M15 & H4] --> B{Apakah Killzone Aktif?}
+    A[Start Scan M15 & H4] --> B{Apakah Masuk Sesi London/NY?}
     B -- Tidak --> C[Sleep & Tunggu Sesi Berikutnya]
-    B -- Ya --> D[Deteksi H4 Bias & M15 Sweep]
-    D --> E{Apakah Ada Sweep?}
+    B -- Ya --> D[Deteksi H4 Bias & FVG Retest]
+    D --> E{Apakah Ada FVG Retest Searah Bias?}
     E -- Tidak --> A
-    E -- Ya: SWEEP BUY --> F{Apakah IFVG BUY Terbentuk?}
-    E -- Ya: SWEEP SELL --> G{Apakah IFVG SELL Terbentuk?}
-    F -- Ya --> H[Hitung Confluence & Validasi Risiko]
-    F -- Tidak --> A
-    G -- Ya --> H
+    E -- Ya --> F[Hitung Confluence & Validasi Risiko]
+    F --> G{Confluence >= 2 & Risiko Valid?}
+    G -- Ya --> H[Simpan ke SQLite & Broadcast via Telegram]
     G -- Tidak --> A
-    H --> I{Confluence >= 3 & Risiko Valid?}
-    I -- Ya --> J[Simpan ke SQLite & Broadcast via Telegram]
-    I -- Tidak --> A
 ```
 
 ---
 
-## 🧠 Arsitektur Kecerdasan Buatan (ML Opsional & LLM Offline)
+## 🧠 Utilitas LLM Offline (Gemini Analysis)
 
-Bot ini menggunakan pendekatan *Hybrid Intelligence* untuk memaksimalkan akurasi tanpa mengorbankan kecepatan eksekusi (latency):
-1. **Aturan Dasar (ICT Rules) sebagai Generator Kandidat:** Seluruh deteksi Sweep, IFVG, Bias H4, dan perhitungan Konfluensi murni menggunakan logika matematika *Price Action* yang deterministik dan instan (0 *latency*).
-2. **Filter Machine Learning (Opsional):** Sinyal yang telah divalidasi oleh aturan ICT dapat difilter secara cerdas oleh model `Logistic Regression` (*scikit-learn*). Model ini memprediksi *Win Probability* berdasarkan historis *trade* SQLite. Fitur ini baru bisa dinyalakan di `config.py` (`USE_ML_FILTER = True`) setelah bot mengumpulkan minimal 200 sampel riil. **(ML ini bersifat opsional / *opt-in*)**.
-3. **Analisis Gemini (Eksklusif Offline):** AI Generatif (LLM) seperti Gemini **HANYA** digunakan secara luring (*offline*) seminggu sekali melalui skrip utilitas `scripts/analyze_with_gemini.py`. Agen LLM dilarang keras untuk berpartisipasi dalam siklus *live scanning* untuk mencegah pembengkakan biaya API, *rate limit*, keterlambatan jaringan, serta halusinasi *non-deterministic*.
+Algoritma eksekusi *live* berjalan murni 100% menggunakan kode mekanikal (*rule-based*) untuk kecepatan dan akurasi (0 *latency*). 
+
+Namun, bot ini menyediakan skrip khusus **Gemini AI** (`scripts/analyze_with_gemini.py`) yang bisa dieksekusi secara manual/luring seminggu sekali untuk menganalisis performa *bot* dari database dan memberikan saran teknikal. Agen LLM dilarang keras untuk berpartisipasi dalam siklus *live scanning*.
 
 ---
 
@@ -102,10 +92,9 @@ GEMINI_API_KEY=AIzaSyA...
 
 ### 5. Pengaturan Parameter (`src/config.py`)
 Sesuaikan perilaku bot pada file `src/config.py`. Beberapa yang penting:
-* `SYMBOLS`: *List* dari mata uang yang di-scan (contoh: `["XAUUSD"]`).
+* `SYMBOLS`: Mata uang yang di-scan (contoh: `["XAUUSD"]`).
 * `CHART_ENABLED`: (`True`/`False`) Nyalakan untuk otomatis merender dan mengirim *chart* ke Telegram saat ada sinyal.
-* `USE_ML_FILTER`: (`True`/`False`) Aktifkan hanya jika Anda sudah men-training model via `train_model.py`.
-* `MIN_CONFLUENCE_SCORE`: Batas skor (default `3` untuk SWING).
+* `MIN_CONFLUENCE_SWING`: Batas skor minimal (default `2` dari maksimal 3).
 
 ---
 
@@ -116,27 +105,14 @@ Gunakan *script launcher* (yang mengaktifkan environment dan watchdog).
 ```bash
 python scripts\watchdog.py
 ```
-*(Direkomendasikan untuk mendaftarkan `watchdog.py` di Windows Task Scheduler `At Startup`.)*
 
 ### 2. Menjalankan Dashboard Analitik (Streamlit)
 ```bash
 streamlit run dashboard/app.py
 ```
 
-### 3. Ekspor Laporan & Analisa Gemini (Mingguan)
+### 3. Simulasi Strategi (Backtest Engine)
 ```bash
-python scripts/export_weekly_report.py
-python scripts/analyze_with_gemini.py
-```
-
----
-
-## 🧪 Cara Melakukan Backtest
-
-Bot ini menyediakan *Backtest Engine* mandiri yang membaca *historical data* (M15 dan H4) dan menyimulasikan berjalannya logika (Sweep, IFVG, Bias) tanpa memerlukan *live tick* MT5.
-
-```bash
-# Pastikan MT5 Anda terbuka dan login (untuk men-download history data)
 python -m scripts.run_backtest --symbol XAUUSD --days 30
 ```
 *Hasil simulasi PnL, Win Rate, dan Profit Factor akan dicetak di layar console.*
@@ -147,14 +123,10 @@ python -m scripts.run_backtest --symbol XAUUSD --days 30
 
 **BACA DENGAN SEKSAMA SEBELUM MENGGUNAKAN PERANGKAT LUNAK INI:**
 
-1. **Bukan Nasihat Keuangan (*Not Financial Advice*):** Perangkat lunak (bot) ini, beserta seluruh kode, skrip, dan dokumentasinya, disediakan semata-mata untuk tujuan **edukasi, penelitian, dan pembelajaran algoritma**. Tidak ada satupun output dari bot ini yang boleh dianggap sebagai rekomendasi investasi atau penasihat keuangan (*financial advice*).
+1. **Bukan Nasihat Keuangan (*Not Financial Advice*):** Perangkat lunak (bot) ini, beserta seluruh kode, skrip, dan dokumentasinya, disediakan semata-mata untuk tujuan **edukasi, penelitian, dan pembelajaran algoritma**. 
 2. **Risiko Kerugian Ekstrem:** Perdagangan valuta asing (Forex) dan komoditas (terutama XAUUSD/Emas) melibatkan risiko kerugian finansial yang sangat tinggi. Pergerakan pasar dapat menyebabkan hilangnya seluruh modal (dana) Anda secara instan.
-3. **Wajib Akun Demo (Mandatory Demo):** Pengguna **DIWAJIBKAN** untuk menggunakan bot ini hanya di akun **Demo/Simulasi** dengan dana virtual. Anda sepenuhnya bertanggung jawab atas segala konsekuensi dan kerugian yang timbul jika Anda secara sengaja menyambungkan bot ini ke akun *Live* (dana riil).
-4. **Perbedaan Lingkungan Pasar:** Terdapat perbedaan signifikan antara lingkungan akun Demo dan akun Live, antara lain:
-   * **Slippage (Lonjakan Harga):** Saat likuiditas rendah atau volatilitas tinggi (seperti rilis berita ekonomi), *order* dapat tereksekusi jauh dari harga sinyal (slippage).
-   * **Spread Pelebaran:** Broker melebarkan *spread* secara dinamis di akun Live yang bisa mempercepat *Stop Loss* tersentuh (*Stop Out*).
-   * **Execution Delay:** Order di server *Live* seringkali mengalami *delay* eksekusi.
-5. **Ketiadaan Jaminan:** Pengembang bot tidak memberikan jaminan keuntungan (*profit*) apa pun, baik tersurat maupun tersirat.
+3. **Wajib Akun Demo (Mandatory Demo):** Pengguna **DIWAJIBKAN** untuk menggunakan bot ini hanya di akun **Demo/Simulasi** dengan dana virtual.
+4. **Ketiadaan Jaminan:** Pengembang bot tidak memberikan jaminan keuntungan (*profit*) apa pun, baik tersurat maupun tersirat.
 
 *Dengan mengunduh, menyalin, dan menjalankan *source code* proyek ini, Anda setuju membebaskan pengembang dari segala bentuk tuntutan atau kerugian finansial.*
 
