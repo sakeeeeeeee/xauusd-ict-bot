@@ -29,16 +29,11 @@ from src.config import (  # noqa: E402
     DATA_H4_COUNT,
     MA_FAST_PERIOD,
     MA_SLOW_PERIOD,
-    SWEEP_LOOKBACK,
-    SWEEP_CANDLE_WINDOW,
-    IFVG_LOOKBACK,
-    NEAR_SWEEP_THRESHOLD,
 )
 from src.analysis import (  # noqa: E402
     get_data,
     detect_robust_bias,
-    detect_sweep,
-    detect_ifvg,
+    detect_fvg_retest,
     calculate_confluence,
 )
 
@@ -132,48 +127,29 @@ def run_mt5_diagnostic():
 
 
 def run_arah_diagnostic():
+    print("=" * 60)
+    print("  DIAGNOSA ARAH — Cek Jarak Support & Resistance (M15)")
+    print("=" * 60)
+
     if not mt5.initialize():
-        print(f"MT5 GAGAL: {mt5.last_error()}")
-        return
+        print(f"\nMT5 GAGAL: {mt5.last_error()}")
+        sys.exit(1)
+    print("\n[OK] MT5 connected")
 
-    df = get_data(SYMBOLS[0], mt5.TIMEFRAME_M15, 60)
-    print("=== Kenapa hanya BUY, bukan SELL? ===\n")
+    df = get_data(SYMBOLS[0], mt5.TIMEFRAME_M15, DATA_M15_COUNT)
+    if df.empty:
+        print("[GAGAL] Tidak dapat mengambil data M15")
+        mt5.shutdown()
+        sys.exit(1)
 
-    prev_high_global = 0
-    prev_low_global = 0
+    # Hardcoded lookback since strategy changed
+    lookback_window = 15
+    df_lookback = df.iloc[-lookback_window:]
 
-    for offset in range(SWEEP_CANDLE_WINDOW):
-        idx = -(1 + offset)
-        candle = df.iloc[idx]
-        lb_end = len(df) + idx
-        lb_start = lb_end - SWEEP_LOOKBACK
-        lookback = df.iloc[lb_start:lb_end]
-        prev_high = lookback["high"].max()
-        prev_low = lookback["low"].min()
-        prev_high_global = prev_high
-        prev_low_global = prev_low
-
-        low_dist = abs(prev_low - candle["low"])
-        high_dist = abs(candle["high"] - prev_high)
-
-        buy_status = (
-            "<-- SWEEP BUY!" if low_dist <= NEAR_SWEEP_THRESHOLD else "(terlalu jauh)"
-        )
-        sell_status = (
-            "<-- SWEEP SELL!" if high_dist <= NEAR_SWEEP_THRESHOLD else "(terlalu jauh)"
-        )
-
-        print(f"Candle -{1 + offset}:")
-        print(
-            f"  Low  = {candle['low']:.2f} vs PrevLow  = {prev_low:.2f} -> jarak: ${low_dist:.2f} {buy_status}"
-        )
-        print(
-            f"  High = {candle['high']:.2f} vs PrevHigh = {prev_high:.2f} -> jarak: ${high_dist:.2f} {sell_status}"
-        )
-        print()
+    prev_high_global = df_lookback["high"].max()
+    prev_low_global = df_lookback["low"].min()
 
     harga = df["close"].iloc[-1]
-    print(f"Threshold near-sweep: ${NEAR_SWEEP_THRESHOLD}")
     print(f"\nPrevHigh (resistance) = {prev_high_global:.2f}")
     print(f"PrevLow  (support)    = {prev_low_global:.2f}")
     print(f"Harga sekarang        = {harga:.2f}")
@@ -181,18 +157,14 @@ def run_arah_diagnostic():
     print(f"Jarak ke Low:  ${abs(prev_low_global - df['low'].iloc[-1]):.2f}")
 
     print("\n--- PENJELASAN ---")
-    print("Harga sedang di area LOW (support) -> BUY sweep terdeteksi")
-    print(f"Untuk SELL sweep, harga harus NAIK dulu ke area {prev_high_global:.2f}")
-    print("Ini normal — sinyal tergantung ARAH pergerakan harga saat ini")
-    print(
-        "\nKedua arah (BUY & SELL) bisa muncul, tinggal tunggu market bergerak ke area yang sesuai"
-    )
+    print("Silver Bullet Strategy berfokus pada FVG Momentum, bukan Sweep.")
+    print("Data Support/Resistance ini sekadar referensi visual untuk Anda.")
     mt5.shutdown()
 
 
 def run_signal_diagnostic():
     print("=" * 60)
-    print("  DIAGNOSA SINYAL — Cek setiap filter")
+    print("  DIAGNOSA SINYAL — Cek filter Silver Bullet FVG")
     print("=" * 60)
 
     if not mt5.initialize():
@@ -224,9 +196,7 @@ def run_signal_diagnostic():
         sys.exit(1)
 
     print("\n--- DATA ---")
-    print(
-        f"  M15 candles: {len(df_m15)} (butuh min {max(MA_SLOW_PERIOD + 1, SWEEP_LOOKBACK + 1)})"
-    )
+    print(f"  M15 candles: {len(df_m15)}")
     print(f"  H4  candles: {len(df_h4)}")
     print(f"  Harga saat ini: {df_m15['close'].iloc[-1]:.2f}")
 
@@ -245,124 +215,56 @@ def run_signal_diagnostic():
     else:
         print(" — OK")
 
-    sweep_status, extreme_price, sweep_idx = detect_sweep(df_m15)
-    print(f"\n--- SWEEP (M15, window={SWEEP_CANDLE_WINDOW} candle) ---")
-    print(f"  Status   : {sweep_status}", end="")
-    if sweep_status == "Searching...":
-        print(" — TIDAK ADA sweep terdeteksi!")
-        print(f"\n  Detail candle terakhir {SWEEP_CANDLE_WINDOW}:")
-        for offset in range(SWEEP_CANDLE_WINDOW):
-            idx = -(1 + offset)
-            candle = df_m15.iloc[idx]
-            lb_end = len(df_m15) + idx
-            lb_start = lb_end - SWEEP_LOOKBACK
-            if lb_start < 0:
-                continue
-            lookback = df_m15.iloc[lb_start:lb_end]
-            prev_high = lookback["high"].max()
-            prev_low = lookback["low"].min()
-            high_diff = candle["high"] - prev_high
-            low_diff = prev_low - candle["low"]
-
-            print(
-                f"  Candle -{1 + offset}: H={candle['high']:.2f} L={candle['low']:.2f} C={candle['close']:.2f}"
-            )
-            print(f"           PrevHigh={prev_high:.2f} PrevLow={prev_low:.2f}")
-            print(
-                f"           Tembus High? {'YA' if candle['high'] > prev_high else f'TIDAK (kurang {abs(high_diff):.2f})'}"
-            )
-            print(
-                f"           Tembus Low?  {'YA' if candle['low'] < prev_low else f'TIDAK (kurang {abs(low_diff):.2f})'}"
-            )
-            if candle["high"] > prev_high:
-                print(
-                    f"           Close < PrevHigh? {'YA — SWEEP SELL!' if candle['close'] < prev_high else 'TIDAK'}"
-                )
-            if candle["low"] < prev_low:
-                print(
-                    f"           Close > PrevLow? {'YA — SWEEP BUY!' if candle['close'] > prev_low else 'TIDAK'}"
-                )
-    else:
-        print(f" — OK! Extreme={extreme_price:.2f}")
-
-    is_ifvg, ifvg_msg = detect_ifvg(df_m15, sweep_status, sweep_idx)
-    print(f"\n--- IFVG (M15, lookback={IFVG_LOOKBACK}) ---")
-    print(f"  Status   : {ifvg_msg}", end="")
-    if not is_ifvg:
-        print(
-            " — TIDAK ADA IFVG"
-            + (
-                " (skip karena belum ada sweep)"
-                if sweep_status == "Searching..."
-                else ""
-            )
-        )
-    else:
-        print(" — OK!")
-
+    fvg_status, entry_price, fvg_idx = detect_fvg_retest(df_m15, bias)
+    print(f"\n--- FVG RETEST (M15) ---")
+    print(f"  Status   : {fvg_status}")
+    if fvg_status != "Searching...":
+        print(f"  Entry    : {entry_price:.2f}")
+    
     side = None
     alignment_error = None
-    if sweep_status == "SWEEP BUY 💧":
-        if ifvg_msg == "IFVG BUY 🧲":
-            side = "BUY 🟢"
-        else:
-            alignment_error = f"BUY Setup Mismatched: Sweep=SWEEP BUY, IFVG={ifvg_msg} (Need IFVG BUY 🧲)"
-    elif sweep_status == "SWEEP SELL 💧":
-        if ifvg_msg == "IFVG SELL 🧲":
-            side = "SELL 🔴"
-        else:
-            alignment_error = f"SELL Setup Mismatched: Sweep=SWEEP SELL, IFVG={ifvg_msg} (Need IFVG SELL 🧲)"
+    if "BUY" in fvg_status:
+        side = "BUY"
+    elif "SELL" in fvg_status:
+        side = "SELL"
 
     confluence = 0
     if side:
-        confluence = calculate_confluence(side, bias, sweep_status, ifvg_msg, kz_active)
+        # Panggil fungsi confluence sesuai pattern baru
+        confluence = calculate_confluence(side, bias, fvg_status, kz_active)
 
     print("\n--- CONFLUENCE ---")
     print(f"  Trade Side : {side if side else 'None'}")
     print(f"  Killzone   : {'1' if kz_active else '0'}")
     if side:
-        bias_aligned = (side == "BUY 🟢" and bias in ("BULLISH", "RANGING")) or (
-            side == "SELL 🔴" and bias in ("BEARISH", "RANGING")
-        )
-        sweep_aligned = (side == "BUY 🟢" and "BUY" in sweep_status) or (
-            side == "SELL 🔴" and "SELL" in sweep_status
-        )
-        ifvg_aligned = (side == "BUY 🟢" and "BUY" in ifvg_msg) or (
-            side == "SELL 🔴" and "SELL" in ifvg_msg
+        bias_aligned = (side == "BUY" and bias in ("BULLISH", "RANGING")) or (
+            side == "SELL" and bias in ("BEARISH", "RANGING")
         )
         print(f"  Bias       : {'1' if bias_aligned else '0'} ({bias})")
-        print(f"  Sweep      : {'1' if sweep_aligned else '0'} ({sweep_status})")
-        print(f"  IFVG       : {'1' if ifvg_aligned else '0'} ({ifvg_msg})")
+        print(f"  FVG Status : 1 ({fvg_status})")
     else:
         print(f"  Bias       : 0 ({bias})")
-        print(f"  Sweep      : 0 ({sweep_status})")
-        print(f"  IFVG       : 0 ({ifvg_msg})")
-    print(f"  Total      : {confluence}/4 (minimum: {MIN_CONFLUENCE_SCORE})")
+        print(f"  FVG Status : 0 ({fvg_status})")
+        
+    print(f"  Total      : {confluence}/3 (minimum: {MIN_CONFLUENCE_SCORE})")
     print(
         f"  Lolos?     : {'YA' if side and confluence >= MIN_CONFLUENCE_SCORE else 'TIDAK'}"
     )
 
     print("\n--- ALIGNMENT DETAILS ---")
     if side:
-        if side == "BUY 🟢":
+        if side == "BUY":
             print("  Target: BUY")
             print(f"  Bias ({bias}) harus BULLISH/RANGING: ✅ OK")
-            print(f"  IFVG ({ifvg_msg}) harus IFVG BUY: ✅ OK")
-        elif side == "SELL 🔴":
+        elif side == "SELL":
             print("  Target: SELL")
             print(f"  Bias ({bias}) harus BEARISH/RANGING: ✅ OK")
-            print(f"  IFVG ({ifvg_msg}) harus IFVG SELL: ✅ OK")
-    elif alignment_error:
-        print(f"  ❌ {alignment_error}")
     else:
-        print("  TIDAK ADA SWEEP yang terdeteksi.")
+        print("  TIDAK ADA FVG yang terdeteksi dan di-retest.")
 
-    if extreme_price > 0:
-        raw_risk = abs(df_m15["close"].iloc[-1] - extreme_price)
+    if fvg_status != "Searching...":
         print("\n--- RISK ---")
-        print(f"  Raw risk : ${raw_risk:.2f}")
-        print(f"  Min/Max  : ${MIN_RISK} - ${MAX_RISK}")
-        print(f"  Valid?   : {'YA' if MIN_RISK <= raw_risk <= MAX_RISK else 'TIDAK'}")
+        print("  SL & Target dihitung dinamis menggunakan ATR oleh Risk Manager.")
 
     print(f"\n{'=' * 60}")
     print("  RINGKASAN")
@@ -371,12 +273,9 @@ def run_signal_diagnostic():
     if not kz_active:
         blockers.append("Di luar Killzone")
     if not side:
-        if sweep_status == "Searching...":
-            blockers.append("Tidak ada Sweep terdeteksi")
-        elif alignment_error:
-            blockers.append(f"Arah tidak align ({alignment_error})")
+        blockers.append("Tidak ada FVG Retest terdeteksi")
     if side and confluence < MIN_CONFLUENCE_SCORE:
-        blockers.append(f"Confluence {confluence}/4 < minimum {MIN_CONFLUENCE_SCORE}")
+        blockers.append(f"Confluence {confluence}/3 < minimum {MIN_CONFLUENCE_SCORE}")
 
     if blockers:
         print(f"\n  SINYAL DIBLOKIR oleh {len(blockers)} filter:")

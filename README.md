@@ -14,9 +14,10 @@ Bot trading otomatis berbasis Python yang diintegrasikan langsung dengan **MetaT
    * Berfokus murni pada pergerakan momentum yang menciptakan **Fair Value Gap (FVG)**.
    * Menunggu harga kembali untuk me-retest FVG tersebut sebelum memberikan sinyal, mengikuti algoritma ICT Silver Bullet klasik.
 
-3. **Filter Waktu Sesi (Killzone Session):**
-   * Hanya melakukan pemindaian dan eksekusi pada jam-jam pasar berlikuiditas tinggi: **Sesi London** (dan **New York** jika diaktifkan).
-   * Mencegah perdagangan pada sesi Asia yang rentan terhadap *whipsaw*.
+3. **Filter Waktu Sesi (Killzone Session) & Anti-Overfitting Profile:**
+   * Hanya melakukan pemindaian dan eksekusi pada jam-jam pasar berlikuiditas tinggi: **Sesi London** dan **Sesi New York**.
+   * Mencegah perdagangan pada sesi Asia yang rentan terhadap *whipsaw* karena ketiadaan likuiditas.
+   * **Profil Anti-Overfitting (Baru!):** Sesi London diizinkan mengeksekusi dengan Skor 2/3 khusus pada hari Senin-Rabu (Hari Trending). Sesi NY diizinkan kapan saja HANYA jika skor konfluensinya sempurna 3/3 untuk mencegah *drawdown* berlebih di akhir pekan.
 
 4. **Manajemen Risiko Cerdas (Smart Risk Manager):**
    * Otomatis menghitung rasio **Risk to Reward (R:R)** yang ideal.

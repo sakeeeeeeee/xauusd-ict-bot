@@ -20,8 +20,6 @@ SYMBOL_ALIASES = {
     "GBPUSD": ["GBPUSD.m", "GBPUSD.ecn", "GBPUSD.pro", "GBPUSDm"],
 }
 
-# === TIMEZONE ===
-UTC_OFFSET = 7  # WIB (Jakarta/Medan)
 
 # === KILLZONE SESSIONS (dalam jam WIB) ===
 KILLZONES = [
@@ -29,17 +27,24 @@ KILLZONES = [
     (14, 17),  # London Session
     (19, 23),  # New York Session
 ]
+
+# === DYNAMIC WEEKLY PROFILE ===
+TREND_DAYS = [0, 1, 2]     # Monday, Tuesday, Wednesday (SWING only)
+RANGING_DAYS = [3, 4]      # Thursday, Friday (SCALP only)
+
 # Subset killzone London/NY — digunakan untuk gating near-sweep
 LONDON_NY_KILLZONES = [
-    (14, 17),  # London Session
-    (19, 23),  # New York Session
+    (14, 18),  # London (14:00 - 18:00 WIB)
+    (19, 23),  # NY (19:00 - 23:00 WIB)
 ]
 
 # === SESSION RULES ===
+# Tiers allowed per session. SCALP requires confluence 2, SWING requires confluence 3.
+# (But dynamically filtered by Weekly Profile in main.py)
 SESSION_RULES = {
     "ASIA": [],
     "LONDON": ["WATCH", "SCALP", "SWING"],
-    "NY": [],
+    "NY": ["WATCH", "SCALP", "SWING"],
 }
 
 # === RISK & MONEY MANAGEMENT ===
@@ -48,7 +53,7 @@ MAX_RISK = 15.0  # Maksimal SL distance (dalam dollar)
 SL_BUFFER = 0.5  # Buffer di bawah swing low / di atas swing high
 TP1_MULTIPLIER = 1.0  # Target Profit 1 (default 1R berdasarkan optimize)
 TP2_MULTIPLIER = 2.0  # Target Profit 2 (2R)
-MAX_TRADE_DURATION_CANDLES = 24  # Maksimal umur trade sebelum dianggap EXPIRED
+MAX_TRADE_DURATION_CANDLES = 48  # Maksimal umur trade sebelum dianggap EXPIRED (48 x M15 = 12 jam)
 MIN_RR = 1.0  # Minimal Risk to Reward ratio untuk TP1
 
 # === ATR DYNAMIC RISK ===
@@ -63,10 +68,12 @@ SESSION_SETTINGS = {
     "LONDON": {
         "ATR_SL_BUFFER_MULT": 0.8,
         "TP1_MULTIPLIER": 1.0,
+        "MIN_CONFLUENCE": 2,  # London: 2/3 cukup (RANGING FVG = 60% WR)
     },
     "NY": {
         "ATR_SL_BUFFER_MULT": 0.8,
         "TP1_MULTIPLIER": 1.0,
+        "MIN_CONFLUENCE": 2,  # NY SCALP requires 2 (dynamically filtered by DOW)
     },
 }
 
@@ -101,11 +108,15 @@ DATA_H4_COUNT = 60  # Jumlah candle H4 (butuh >= 50 untuk MA_SLOW)
 
 # === CONFLUENCE TIERS ===
 # Tier SWING: Sinyal berkualitas tinggi, minimum 2/3 confluence (Time + Bias + FVG).
-MIN_CONFLUENCE_SWING = 2
+MIN_CONFLUENCE_SWING = 3
 
 # === TIMING ===
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 15))
 SLEEP_OUTSIDE_KZ = int(os.getenv("SLEEP_OUTSIDE_KZ", 300))
+# Konfigurasi offset jam (Standar WIB adalah 7)
+UTC_OFFSET = int(os.getenv("UTC_OFFSET", 7))
+# Offset timezone Broker (Exness biasanya UTC+2/3)
+BROKER_UTC_OFFSET = int(os.getenv("BROKER_UTC_OFFSET", 3))
 ERROR_SLEEP = int(os.getenv("ERROR_SLEEP", 60))
 WEEKEND_SLEEP = int(os.getenv("WEEKEND_SLEEP", 3600))
 HEALTH_PING_INTERVAL_HOURS = int(os.getenv("HEALTH_PING_INTERVAL_HOURS", 6))

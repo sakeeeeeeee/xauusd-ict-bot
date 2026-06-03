@@ -41,8 +41,9 @@ def evaluate_outcomes(
         try:
             trade_time = datetime.fromisoformat(trade_time_str)
             # Menghitung estimasi "candle umur" berdasarkan delta waktu.
+            # Menggunakan M15 sebagai basis (live bot mengirim df_m15 ke update_outcomes)
             delta_mins = (current_time - trade_time).total_seconds() / 60.0
-            age_candles = delta_mins / 5.0
+            age_candles = delta_mins / 15.0
         except Exception:
             age_candles = 0
 
@@ -90,23 +91,39 @@ def update_outcomes(df_trigger: pd.DataFrame) -> list[dict]:
     if not trades:
         return []
 
-    current_high = df_trigger["high"].iloc[-1]
-    current_low = df_trigger["low"].iloc[-1]
+    updated_trades_list = []
+    changes_made_overall = False
 
-    updated_trades, changes_made = evaluate_outcomes(
-        trades, current_high, current_low, current_time=None
-    )
+    for i in range(len(df_trigger)):
+        current_high = df_trigger["high"].iloc[i]
+        current_low = df_trigger["low"].iloc[i]
 
-    if changes_made:
-        for t in updated_trades:
-            # Hitung mock pnl
+        updated, changes = evaluate_outcomes(
+            trades, current_high, current_low, current_time=None
+        )
+        if changes:
+            updated_trades_list.extend(updated)
+            changes_made_overall = True
+            # Update 'trades' list to remove evaluated ones so we don't re-evaluate
+            pending = []
+            for t in trades:
+                if t.get("result", "") == "PENDING":
+                    pending.append(t)
+            trades = pending
+            if not trades:
+                break
+
+    if changes_made_overall:
+        for t in updated_trades_list:
+            # Hitung PnL dari jarak aktual entry ke TP/SL
             pnl = 0.0
+            entry = float(t.get("entry", 0))
             if "WIN_TP1" in t["result"]:
-                pnl = t.get("risk", 0) * 1.5
+                pnl = abs(float(t.get("tp1", 0)) - entry)
             elif "WIN_TP2" in t["result"]:
-                pnl = t.get("risk", 0) * 4.0
+                pnl = abs(float(t.get("tp2", 0)) - entry)
             elif "LOSS" in t["result"]:
-                pnl = -t.get("risk", 0)
+                pnl = -abs(float(t.get("sl", 0)) - entry)
 
             try:
                 update_trade_result_by_id(t["id"], t["result"], pnl)
@@ -115,4 +132,4 @@ def update_outcomes(df_trigger: pd.DataFrame) -> list[dict]:
                     f"Failed to update trade outcome to DB for trade ID {t.get('id')}: {e}"
                 )
 
-    return updated_trades
+    return updated_trades_list

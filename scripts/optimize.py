@@ -63,9 +63,8 @@ def run_optimization():
         config.SESSION_SETTINGS["LONDON"]["TP1_MULTIPLIER"] = 1.0
 
         rm.ATR_MAX_RISK_MULT = 5.0  # Agar SL besar tidak ter-reject otomatis
-        rm.TP2_MULTIPLIER = tp1 * 2  # TP2 kita buat selalu 2x TP1
+        config.TP2_MULTIPLIER = tp1 * 2  # TP2 kita buat selalu 2x TP1 (patch config, bukan rm)
 
-        engine.MIN_CONFLUENCE_SCALP = scalp_conf
         engine.MIN_CONFLUENCE_SWING = scalp_conf
 
         # --- RUN BACKTEST IN MEMORY ---
@@ -81,13 +80,13 @@ def run_optimization():
             quiet=True,
         )
 
-        # --- HITUNG HASIL (KHUSUS NY) ---
+        # --- HITUNG HASIL (KHUSUS LONDON) ---
         if df_trades is not None and not df_trades.empty:
             df_trades["r_multiple"] = df_trades.apply(calculate_r, axis=1)
-            # Filter HANYA trade dari sesi NY untuk melihat performanya
+            # Filter trade dari sesi LONDON (karena SESSION_RULES['NY'] = [] memblokir semua NY trades)
             resolved = df_trades[
                 (df_trades["result"].isin(["WIN_TP1", "WIN_TP2", "LOSS"]))
-                & (df_trades["session"] == "NY")
+                & (df_trades["session"] == "LONDON")
             ]
 
             total_trades = len(resolved)

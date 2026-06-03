@@ -25,8 +25,11 @@ from src.config import (
     UTC_OFFSET,
     KILLZONES,
     SESSION_RULES,
+    SESSION_SETTINGS,
     MIN_CONFLUENCE_SCORE,
     MIN_RR,
+    TREND_DAYS,
+    RANGING_DAYS,
     MAX_SPREAD,
     NEWS_BLACKOUT_MINUTES,
     NEWS_SCHEDULE_FILE,
@@ -61,6 +64,7 @@ from src.analysis import (
     detect_h4_structure,
 )
 from src.risk import validate_risk, calculate_sl_tp, log_trade
+from src.risk.outcome_tracker import update_outcomes
 
 
 # ============================================================
@@ -71,6 +75,8 @@ from src.risk import validate_risk, calculate_sl_tp, log_trade
 def setup_logging():
     """Configure logging ke file + console."""
     logger = logging.getLogger("xauusd_bot")
+    if logger.handlers:
+        return logger  # Avoid duplicate handlers on repeat calls
     logger.setLevel(logging.DEBUG)
 
     # File handler — rotating, max 5MB x 5 backup
@@ -323,8 +329,9 @@ def build_signal_message(
     confluence: int,
 ) -> str:
     """Format pesan sinyal untuk Telegram."""
-    rr1 = 2
-    rr2 = 4
+    # Compute actual RR from the computed entry/tp/risk values
+    rr1 = round(abs(tp1 - harga) / risk, 1) if risk > 0 else 0
+    rr2 = round(abs(tp2 - harga) / risk, 1) if risk > 0 else 0
     wib_time = get_wib_now().strftime("%H:%M WIB")
 
     return (
@@ -491,6 +498,12 @@ def run_engine():
                         logger.warning(f"Data {sym} kosong, retrying...")
                         continue
 
+                    # === EVALUATE PENDING TRADES (C2 FIX) ===
+                    # Use M15 data — covers 15h window, sufficient for outcome tracking
+                    updated_trades = update_outcomes(df_m15)
+                    if updated_trades:
+                        logger.info(f"Updated {len(updated_trades)} pending trades for {sym}.")
+
                     # === ANALYSIS ===
                     bias = detect_robust_bias(df_h4)
                     pd_zone = detect_premium_discount(df_h4)
@@ -555,209 +568,238 @@ def run_engine():
                     )
 
                     # === ENTRY LOGIC (AGGRESSIVE & ALIGNED) ===
+                    session_min_conf = SESSION_SETTINGS.get(session, {}).get(
+                        "MIN_CONFLUENCE", MIN_CONFLUENCE_SCORE
+                    )
                     if (
                         side
-                        and confluence >= MIN_CONFLUENCE_SCORE
+                        and confluence >= 2 # Accept minimum score 2 initially
                         and signal_trackers[sym][side.split()[0]]["last_candle_time"]
                         != current_candle_time
                     ):
-                        if side:
-                            # NEWS BLACKOUT VALIDATION
-                            in_blackout, nt = is_news_blackout()
-                            if in_blackout:
-                                logger.info(
-                                    f"Signal ditolak (News Blackout): Mendekati news rilis {nt} WIB"
-                                )
-                                set_symbol_state(
-                                    sym, "last_rejection_reason", "News Blackout"
-                                )
-                                continue
-
-                            # SPREAD VALIDATION
-                            tick = mt5.symbol_info_tick(sym)
-                            if tick:
-                                spread = tick.ask - tick.bid
-                                if spread > MAX_SPREAD:
-                                    logger.info(
-                                        f"Signal ditolak (Spread terlalu besar): {spread:.2f} > {MAX_SPREAD}"
-                                    )
-                                    set_symbol_state(
-                                        sym,
-                                        "last_rejection_reason",
-                                        "Spread terlalu besar",
-                                    )
-                                    continue
-
-                            # VALIDASI PREMIUM / DISCOUNT
-                            if side == "BUY" and pd_zone != "DISCOUNT":
-                                logger.info(
-                                    f"Signal BUY ditolak karena berada di {pd_zone} zone (harus DISCOUNT)."
-                                )
-                                set_symbol_state(
-                                    sym,
-                                    "last_rejection_reason",
-                                    "Bukan Discount Zone (BUY)",
-                                )
-                                continue
-                            elif side == "SELL" and pd_zone != "PREMIUM":
-                                logger.info(
-                                    f"Signal SELL ditolak karena berada di {pd_zone} zone (harus PREMIUM)."
-                                )
-                                set_symbol_state(
-                                    sym,
-                                    "last_rejection_reason",
-                                    "Bukan Premium Zone (SELL)",
-                                )
-                                continue
-
-                            # INVALIDATION CHECK
-                            is_invalid, inv_reason = check_invalidation(
-                                df_m15, side, extreme_price
-                            )
-                            if is_invalid:
-                                logger.info(
-                                    f"Signal ditolak (Invalidation): {inv_reason}"
-                                )
-                                set_symbol_state(
-                                    sym,
-                                    "last_rejection_reason",
-                                    "Invalidation (misal Wick/Close salah)",
-                                )
-                                continue
-
-                            # RISK VALIDATION
-                            raw_risk = abs(harga_now - extreme_price)
-                            is_valid, reason = validate_risk(raw_risk, atr=atr)
-                            if not is_valid:
-                                logger.info(f"Risk rejected: {reason}")
-                                set_symbol_state(
-                                    sym,
-                                    "last_rejection_reason",
-                                    "Risk to Reward atau SL terlalu besar/kecil",
-                                )
-                                continue
-
-                            # CALCULATE SL/TP
-                            levels = calculate_sl_tp(
-                                side,
-                                harga_now,
-                                extreme_price,
-                                df=df_m15,
-                                atr=atr,
-                                session=session,
-                            )
-
-                            # RR VALIDATION (TP1)
-                            if levels["risk"] > 0:
-                                actual_rr = (
-                                    abs(levels["tp1"] - harga_now) / levels["risk"]
-                                )
-                                if actual_rr < MIN_RR:
-                                    logger.info(
-                                        f"Signal ditolak (RR insufficient): "
-                                        f"Risk=${levels['risk']:.2f}, Target=${abs(levels['tp1'] - harga_now):.2f}, "
-                                        f"RR={actual_rr:.2f} < {MIN_RR}"
-                                    )
-                                    set_symbol_state(
-                                        sym,
-                                        "last_rejection_reason",
-                                        "RR tidak mencapai Minimum (1:1.5)",
-                                    )
-                                    continue
-
-                            # Confidence label berdasarkan confluence
-                            if confluence >= 3:
-                                confidence = "🔥 PERFECT"
-                            elif confluence >= 2:
-                                confidence = "⚡ SWING"
+                        from src.config import TREND_DAYS, RANGING_DAYS
+                        
+                        # === ROBUST ANTI-OVERFITTING PROFILE ===
+                        current_dow = get_wib_now().weekday()
+                        is_valid_entry = False
+                        if session == "LONDON":
+                            if current_dow in TREND_DAYS and confluence >= 2:
+                                is_valid_entry = True
                             else:
-                                confidence = "📊 AGGRESSIVE"
+                                logger.info(f"Signal ditolak: London DOW Filter pada hari {current_dow} dengan skor {confluence}.")
+                                set_symbol_state(sym, "last_rejection_reason", "DOW Filter: Invalid London")
+                        elif session == "NY":
+                            if confluence >= 3:
+                                is_valid_entry = True
+                            else:
+                                logger.info(f"Signal ditolak: NY DOW Filter pada hari {current_dow} dengan skor {confluence}.")
+                                set_symbol_state(sym, "last_rejection_reason", "DOW Filter: Invalid NY")
+                        
+                        if not is_valid_entry:
+                            continue
+                            
+                        tier = "SWING" if confluence >= 3 else "SCALP"
 
-                            # H4 STRUCTURE VALIDATION (Khusus SWING/PERFECT)
-                            if "SWING" in confidence or "PERFECT" in confidence:
-                                if side == "BUY" and h4_struct == "BEARISH":
-                                    logger.info(
-                                        "Signal BUY ditolak (Structure): Setup SWING tapi H4 Structure BEARISH"
-                                    )
-                                    set_symbol_state(
-                                        sym,
-                                        "last_rejection_reason",
-                                        "H4 Structure Bearish (Setup Swing BUY)",
-                                    )
-                                    continue
-                                elif side == "SELL" and h4_struct == "BULLISH":
-                                    logger.info(
-                                        "Signal SELL ditolak (Structure): Setup SWING tapi H4 Structure BULLISH"
-                                    )
-                                    set_symbol_state(
-                                        sym,
-                                        "last_rejection_reason",
-                                        "H4 Structure Bullish (Setup Swing SELL)",
-                                    )
-                                    continue
+                        # NEWS BLACKOUT VALIDATION
+                        in_blackout, nt = is_news_blackout()
+                        if in_blackout:
+                            logger.info(
+                                f"Signal ditolak (News Blackout): Mendekati news rilis {nt} WIB"
+                            )
+                            set_symbol_state(
+                                sym, "last_rejection_reason", "News Blackout"
+                            )
+                            continue
 
-                            # BUILD & SEND SIGNAL
-                            pesan = build_signal_message(
+                        # SPREAD VALIDATION
+                        tick = mt5.symbol_info_tick(sym)
+                        if tick:
+                            spread = tick.ask - tick.bid
+                            if spread > MAX_SPREAD:
+                                logger.info(
+                                    f"Signal ditolak (Spread terlalu besar): {spread:.2f} > {MAX_SPREAD}"
+                                )
+                                set_symbol_state(
+                                    sym,
+                                    "last_rejection_reason",
+                                    "Spread terlalu besar",
+                                )
+                                continue
+
+                        # VALIDASI PREMIUM / DISCOUNT
+                        if side == "BUY" and pd_zone != "DISCOUNT":
+                            logger.info(
+                                f"Signal BUY ditolak karena berada di {pd_zone} zone (harus DISCOUNT)."
+                            )
+                            set_symbol_state(
+                                sym,
+                                "last_rejection_reason",
+                                "Bukan Discount Zone (BUY)",
+                            )
+                            continue
+                        elif side == "SELL" and pd_zone != "PREMIUM":
+                            logger.info(
+                                f"Signal SELL ditolak karena berada di {pd_zone} zone (harus PREMIUM)."
+                            )
+                            set_symbol_state(
+                                sym,
+                                "last_rejection_reason",
+                                "Bukan Premium Zone (SELL)",
+                            )
+                            continue
+
+                        # INVALIDATION CHECK
+                        is_invalid, inv_reason = check_invalidation(
+                            df_m15, side, extreme_price
+                        )
+                        if is_invalid:
+                            logger.info(
+                                f"Signal ditolak (Invalidation): {inv_reason}"
+                            )
+                            set_symbol_state(
+                                sym,
+                                "last_rejection_reason",
+                                "Invalidation (misal Wick/Close salah)",
+                            )
+                            continue
+
+                        # RISK VALIDATION
+                        raw_risk = abs(harga_now - extreme_price)
+                        is_valid, reason = validate_risk(raw_risk, atr=atr)
+                        if not is_valid:
+                            logger.info(f"Risk rejected: {reason}")
+                            set_symbol_state(
+                                sym,
+                                "last_rejection_reason",
+                                "Risk to Reward atau SL terlalu besar/kecil",
+                            )
+                            continue
+
+                        # CALCULATE SL/TP
+                        levels = calculate_sl_tp(
+                            side,
+                            harga_now,
+                            extreme_price,
+                            df=df_m15,
+                            atr=atr,
+                            session=session,
+                        )
+
+                        # RR VALIDATION (TP1)
+                        if levels["risk"] > 0:
+                            actual_rr = (
+                                abs(levels["tp1"] - harga_now) / levels["risk"]
+                            )
+                            if actual_rr < MIN_RR:
+                                logger.info(
+                                    f"Signal ditolak (RR insufficient): "
+                                    f"Risk=${levels['risk']:.2f}, Target=${abs(levels['tp1'] - harga_now):.2f}, "
+                                    f"RR={actual_rr:.2f} < {MIN_RR}"
+                                )
+                                set_symbol_state(
+                                    sym,
+                                    "last_rejection_reason",
+                                    "RR tidak mencapai Minimum (1:1.5)",
+                                )
+                                continue
+
+                        # Confidence label berdasarkan confluence
+                        if confluence >= 3:
+                            confidence = "🔥 PERFECT"
+                        elif confluence >= 2:
+                            confidence = "⚡ SWING"
+                        else:
+                            confidence = "📊 AGGRESSIVE"
+
+                        # H4 STRUCTURE VALIDATION (Khusus SWING/PERFECT)
+                        if "SWING" in confidence or "PERFECT" in confidence:
+                            if side == "BUY" and h4_struct == "BEARISH":
+                                logger.info(
+                                    "Signal BUY ditolak (Structure): Setup SWING tapi H4 Structure BEARISH"
+                                )
+                                set_symbol_state(
+                                    sym,
+                                    "last_rejection_reason",
+                                    "H4 Structure Bearish (Setup Swing BUY)",
+                                )
+                                continue
+                            elif side == "SELL" and h4_struct == "BULLISH":
+                                logger.info(
+                                    "Signal SELL ditolak (Structure): Setup SWING tapi H4 Structure BULLISH"
+                                )
+                                set_symbol_state(
+                                    sym,
+                                    "last_rejection_reason",
+                                    "H4 Structure Bullish (Setup Swing SELL)",
+                                )
+                                continue
+
+                        # BUILD & SEND SIGNAL
+                        pesan = build_signal_message(
+                            side=side,
+                            harga=harga_now,
+                            sl=levels["sl"],
+                            tp1=levels["tp1"],
+                            tp2=levels["tp2"],
+                            risk=levels["risk"],
+                            bias=bias,
+                            confluence=confluence,
+                        )
+
+                        # KIRIM — hanya lock anti-spam jika BERHASIL terkirim
+                        if kirim_telegram(pesan):
+                            signal_trackers[sym][side.split()[0]][
+                                "last_candle_time"
+                            ] = current_candle_time
+                            set_symbol_state(
+                                sym,
+                                "last_signal_time",
+                                get_wib_now().strftime("%H:%M:%S WIB"),
+                            )
+                            logger.info(
+                                f"✅ SIGNAL {side} SENT @ {harga_now} "
+                                f"[{confidence}] Confluence={confluence}/3"
+                            )
+
+                            # KIRIM CHART JIKA ENABLED
+                            if CHART_ENABLED:
+                                chart_path = "generate_chart.png"
+                                try:
+                                    generate_chart(
+                                        df=df_m15,
+                                        symbol=sym,
+                                        entry_price=harga_now,
+                                        sl_price=levels["sl"],
+                                        tp1_price=levels["tp1"],
+                                        tp2_price=levels["tp2"],
+                                        save_path=chart_path,
+                                    )
+                                    kirim_photo(
+                                        chart_path,
+                                        caption=f"📊 Chart {sym} M15 ({confidence})",
+                                    )
+                                except Exception as ce:
+                                    logger.error(f"Gagal kirim chart: {ce}")
+
+                            # LOG TRADE
+                            log_trade(
                                 side=side,
-                                harga=harga_now,
+                                entry=harga_now,
                                 sl=levels["sl"],
                                 tp1=levels["tp1"],
                                 tp2=levels["tp2"],
                                 risk=levels["risk"],
+                                confluence_score=confluence,
                                 bias=bias,
-                                confluence=confluence,
+                                tier="SWING",
+                                session=session,
+                                atr=atr,
+                                spread=(tick.ask - tick.bid) if tick else 0.0,
                             )
-
-                            # KIRIM — hanya lock anti-spam jika BERHASIL terkirim
-                            if kirim_telegram(pesan):
-                                signal_trackers[sym][side.split()[0]][
-                                    "last_candle_time"
-                                ] = current_candle_time
-                                set_symbol_state(
-                                    sym,
-                                    "last_signal_time",
-                                    get_wib_now().strftime("%H:%M:%S WIB"),
-                                )
-                                logger.info(
-                                    f"✅ SIGNAL {side} SENT @ {harga_now} "
-                                    f"[{confidence}] Confluence={confluence}/3"
-                                )
-
-                                # KIRIM CHART JIKA ENABLED
-                                if CHART_ENABLED:
-                                    chart_path = "generate_chart.png"
-                                    try:
-                                        generate_chart(
-                                            df=df_m15,
-                                            symbol=sym,
-                                            entry_price=harga_now,
-                                            sl_price=levels["sl"],
-                                            tp1_price=levels["tp1"],
-                                            tp2_price=levels["tp2"],
-                                            save_path=chart_path,
-                                        )
-                                        kirim_photo(
-                                            chart_path,
-                                            caption=f"📊 Chart {sym} M15 ({confidence})",
-                                        )
-                                    except Exception as ce:
-                                        logger.error(f"Gagal kirim chart: {ce}")
-
-                                # LOG TRADE
-                                log_trade(
-                                    side=side,
-                                    entry=harga_now,
-                                    sl=levels["sl"],
-                                    tp1=levels["tp1"],
-                                    tp2=levels["tp2"],
-                                    risk=levels["risk"],
-                                    confluence_score=confluence,
-                                    bias=bias,
-                                )
-                            else:
-                                logger.warning(
-                                    "⚠️ Signal gagal terkirim, akan dicoba lagi."
-                                )
+                        else:
+                            logger.warning(
+                                "⚠️ Signal gagal terkirim, akan dicoba lagi."
+                            )
 
                     # STATUS LOG (visible di console supaya user tau bot jalan)
                     wib_str = get_wib_now().strftime("%H:%M:%S")

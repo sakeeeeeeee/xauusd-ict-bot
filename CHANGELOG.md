@@ -14,6 +14,9 @@ Format pencatatan log mengacu pada [Keep a Changelog](https://keepachangelog.com
 - **Automated CI/CD**: Workflow GitHub Actions (`.github/workflows/ci.yml`) untuk menjalankan instalasi *library*, *Ruff linting*, dan `pytest` secara in-memory (tanpa MetaTrader 5 live server).
 - **Windows Task Scheduler Guide**: Dokumentasi (`docs/windows_service.md`) dan script pengawas (`scripts/watchdog.py`) untuk menjaga proses bot *up* secara permanen di server VPS.
 
+### Changed
+- **[Strategy Update] Robust Anti-Overfitting Profile**: Menghapus paksaan masuk (*Scalping*) di hari Kamis-Jumat untuk sesi NY akibat drawdawn tinggi (-45R) dalam uji mundur 300 hari. Aturan baru menstandarkan sesi London hanya beroperasi di hari Senin-Rabu dengan Skor minimal 2, sementara Sesi NY bebas hari namun diwajibkan memiliki skor konfluensi sempurna 3/3 (menghasilkan rasio kemenangan NY historis 100%).
+
 ## [2.1.0] - 2026-05-27
 
 ### Added

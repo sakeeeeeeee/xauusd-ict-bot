@@ -21,16 +21,21 @@ from src.config import (
     DATA_M5_COUNT,
     DATA_M15_COUNT,
     DATA_H4_COUNT,
-    MIN_CONFLUENCE_SCALP,
     MIN_CONFLUENCE_SWING,
     UTC_OFFSET,
+    BROKER_UTC_OFFSET,
     KILLZONES,
     LONDON_NY_KILLZONES,
     SESSION_RULES,
+    SESSION_SETTINGS,
+    TREND_DAYS,
+    RANGING_DAYS,
 )
+MIN_CONFLUENCE_SCALP = 1  # Fallback local constant
 from src.analysis.analysis import (
     get_atr,
     detect_robust_bias,
+    detect_premium_discount,
     detect_fvg_retest,
     calculate_confluence,
     detect_h4_structure,
@@ -191,8 +196,10 @@ def run_backtest(
 
     for i in range(min_m5_index, len(df_m5)):
         # Slices
-        # Adding UTC_OFFSET since our time helpers expect WIB and we simulate it
-        current_time = df_m5.iloc[i]["time"] + timedelta(hours=UTC_OFFSET)
+        # Adding (UTC_OFFSET - BROKER_UTC_OFFSET) to map broker time to local WIB
+        current_time = df_m5.iloc[i]["time"] + timedelta(
+            hours=(UTC_OFFSET - BROKER_UTC_OFFSET)
+        )
 
         df_trigger = df_m5.iloc[i - DATA_M5_COUNT + 1 : i + 1].copy()
 
@@ -226,12 +233,12 @@ def run_backtest(
 
         # ------------------- ANALYSIS -------------------
         bias = detect_robust_bias(df_h4)
-        # pd_zone = detect_premium_discount(df_h4)
-        _ = detect_h4_structure(df_h4)
+        pd_zone = detect_premium_discount(df_h4)
+        h4_struct = detect_h4_structure(df_h4)
         atr = get_atr(df_m15)
 
         # 3. Cek FVG Retest
-        fvg_status, extreme_price, fvg_idx = detect_fvg_retest(df_trigger, bias=bias)
+        fvg_status, extreme_price, fvg_idx = detect_fvg_retest(df_m15, bias=bias)
 
         side = None
         if "BUY" in fvg_status:
@@ -258,18 +265,32 @@ def run_backtest(
                 time_diff = (current_time - tracker["last_time"]).total_seconds() / 60.0
                 if time_diff < 15:
                     is_spam = True
-
+        is_valid_entry = False
         if side and not is_spam:
-            if confluence >= MIN_CONFLUENCE_SWING:
-                tier = "SWING"
-            elif confluence >= MIN_CONFLUENCE_SCALP:
-                tier = "SCALP"
+            session = get_current_session(current_time)
+            current_dow = current_time.weekday()
+            
+            # === ROBUST ANTI-OVERFITTING PROFILE ===
+            is_valid_entry = False
+            if session == "LONDON":
+                # London: Great on Mon-Wed with score >= 2.
+                if current_dow in TREND_DAYS and confluence >= 2:
+                    is_valid_entry = True
+            elif session == "NY":
+                # NY: Highly profitable ONLY with perfect confluence (score 3) on ALL days.
+                if confluence >= 3:
+                    is_valid_entry = True
+            
+            if not is_valid_entry:
+                continue
+            
+            # Assign tier just for reporting
+            tier = "SWING" if confluence >= 3 else "SCALP"
 
         # Entry Logic
-        if tier and side:
+        if side and is_valid_entry:
             skip_reason = None
-            session = get_current_session(current_time)
-
+            # Validasi news blackout
             in_blackout, _ = is_news_blackout(current_time)
             if in_blackout:
                 skip_reason = "News Blackout"
@@ -284,15 +305,26 @@ def run_backtest(
                     skip_reason = "Invalidated"
 
             if not skip_reason:
+                # PREMIUM/DISCOUNT ZONE FILTER (parity with live bot)
+                if side == "BUY" and pd_zone != "DISCOUNT":
+                    skip_reason = "BUY not in Discount zone"
+                elif side == "SELL" and pd_zone != "PREMIUM":
+                    skip_reason = "SELL not in Premium zone"
+
+            if not skip_reason:
+                # H4 STRUCTURE FILTER (parity with live bot)
+                if side == "BUY" and h4_struct == "BEARISH":
+                    skip_reason = "H4 Structure Bearish (BUY rejected)"
+                elif side == "SELL" and h4_struct == "BULLISH":
+                    skip_reason = "H4 Structure Bullish (SELL rejected)"
+
+            if not skip_reason:
                 levels = calculate_sl_tp(
                     side, harga_now, extreme_price, df_trigger, atr, session
                 )
                 is_valid, _ = validate_risk(levels["risk"], atr)
                 if not is_valid:
                     skip_reason = "Risk validation failed"
-
-            # HAPUS filter PD Zone karena Silver Bullet murni fokus di FVG Momentum
-            # (Momentum sering kali terbentuk di area Premium untuk Bullish)
 
             if not skip_reason:
                 # Execute Trade

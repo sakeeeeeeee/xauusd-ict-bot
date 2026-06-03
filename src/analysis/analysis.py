@@ -49,6 +49,9 @@ def get_data(symbol: str, timeframe: int, n: int = 100) -> pd.DataFrame:
 def detect_robust_bias(df: pd.DataFrame) -> str:
     """
     Deteksi bias menggunakan dual MA di H4.
+    BULLISH = harga di atas kedua MA DAN fast MA > slow MA (trend confirmed).
+    BEARISH = harga di bawah kedua MA DAN fast MA < slow MA (trend confirmed).
+    Jika MA belum crossover (bouncing melawan tren), tetap RANGING.
     Returns: 'BULLISH', 'BEARISH', atau 'RANGING'
     """
     if df.empty or len(df) < MA_SLOW_PERIOD + 1:
@@ -61,13 +64,13 @@ def detect_robust_bias(df: pd.DataFrame) -> str:
     fast_val = ma_fast.iloc[-1]
     slow_val = ma_slow.iloc[-1]
 
-    # Harga di atas KEDUA MA = BULLISH kuat
-    if close > fast_val and close > slow_val:
+    # BULLISH: Harga di atas KEDUA MA + MA crossover confirmed (fast > slow)
+    if close > fast_val and close > slow_val and fast_val > slow_val:
         return "BULLISH"
-    # Harga di bawah KEDUA MA = BEARISH kuat
-    elif close < fast_val and close < slow_val:
+    # BEARISH: Harga di bawah KEDUA MA + MA crossover confirmed (fast < slow)
+    elif close < fast_val and close < slow_val and fast_val < slow_val:
         return "BEARISH"
-    # Mixed = RANGING
+    # Mixed / bouncing melawan tren = RANGING
     return "RANGING"
 
 
@@ -203,7 +206,7 @@ def detect_fvg_retest(
 
     # Kita mundur mencari FVG yang terbentuk maksimal 15 candle terakhir
     # i adalah index untuk candle ke-3 dari formasi FVG
-    for i in range(last_idx - 1, last_idx - 15, -1):
+    for i in range(last_idx - 1, max(2, last_idx - 15), -1):
         c1 = df.iloc[i - 2]
         # c2 = df.iloc[i - 1] # Unused
         c3 = df.iloc[i]
@@ -225,8 +228,9 @@ def detect_fvg_retest(
                 if test_candle["low"] <= gap_top:
                     retested = True
 
-            # Sinyal valid jika gap belum jebol, sudah diretest, dan bias searah
-            if is_valid and retested and bias == "BULLISH":
+            # Sinyal valid jika gap belum jebol, sudah diretest
+            # Bias filtering dilakukan oleh confluence scoring (bukan hard gate)
+            if is_valid and retested and bias in ("BULLISH", "RANGING"):
                 logger.info(
                     f"FVG BUY Retest detected! Gap: {gap_bottom:.2f} - {gap_top:.2f}"
                 )
@@ -248,7 +252,8 @@ def detect_fvg_retest(
                 if test_candle["high"] >= gap_bottom:
                     retested = True
 
-            if is_valid and retested and bias == "BEARISH":
+            # Bias filtering dilakukan oleh confluence scoring (bukan hard gate)
+            if is_valid and retested and bias in ("BEARISH", "RANGING"):
                 logger.info(
                     f"FVG SELL Retest detected! Gap: {gap_bottom:.2f} - {gap_top:.2f}"
                 )

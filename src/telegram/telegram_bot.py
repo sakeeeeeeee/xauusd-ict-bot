@@ -567,16 +567,17 @@ def kirim_photo(photo_path: str, caption: str = "", timeout: int = 20) -> bool:
     if _bot_app and _bot_loop and _bot_loop.is_running():
         try:
             with open(photo_path, "rb") as f:
-                coro = _bot_app.bot.send_photo(
-                    chat_id=TELEGRAM_CHAT_ID,
-                    photo=f,
-                    caption=caption,
-                    parse_mode="Markdown",
-                    read_timeout=timeout,
-                    write_timeout=timeout,
-                )
-                future = asyncio.run_coroutine_threadsafe(coro, _bot_loop)
-                future.result(timeout=timeout + 5)
+                photo_bytes = f.read()
+            coro = _bot_app.bot.send_photo(
+                chat_id=TELEGRAM_CHAT_ID,
+                photo=photo_bytes,
+                caption=caption,
+                parse_mode="Markdown",
+                read_timeout=timeout,
+                write_timeout=timeout,
+            )
+            future = asyncio.run_coroutine_threadsafe(coro, _bot_loop)
+            future.result(timeout=timeout + 5)
             logger.info("Telegram: Photo terkirim (via PTB async).")
             return True
         except Exception as e:
