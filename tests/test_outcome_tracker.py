@@ -65,7 +65,7 @@ def test_update_outcomes_sell_loss(mock_db):
 
 
 def test_update_outcomes_expired(mock_db):
-    old_time = datetime.now() - timedelta(minutes=(MAX_TRADE_DURATION_CANDLES * 5 + 10))
+    old_time = datetime.now() - timedelta(minutes=(MAX_TRADE_DURATION_CANDLES * 15 + 10))
     trade = {
         "time": old_time.isoformat(),
         "side": "BUY 🟢",
