@@ -23,8 +23,6 @@ from src.config import (  # noqa: E402
     UTC_OFFSET,
     KILLZONES,
     MIN_CONFLUENCE_SCORE,
-    MIN_RISK,
-    MAX_RISK,
     DATA_M15_COUNT,
     DATA_H4_COUNT,
     MA_FAST_PERIOD,
@@ -216,13 +214,12 @@ def run_signal_diagnostic():
         print(" — OK")
 
     fvg_status, entry_price, fvg_idx = detect_fvg_retest(df_m15, bias)
-    print(f"\n--- FVG RETEST (M15) ---")
+    print("\n--- FVG RETEST (M15) ---")
     print(f"  Status   : {fvg_status}")
     if fvg_status != "Searching...":
         print(f"  Entry    : {entry_price:.2f}")
     
     side = None
-    alignment_error = None
     if "BUY" in fvg_status:
         side = "BUY"
     elif "SELL" in fvg_status:

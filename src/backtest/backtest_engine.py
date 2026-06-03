@@ -21,15 +21,12 @@ from src.config import (
     DATA_M5_COUNT,
     DATA_M15_COUNT,
     DATA_H4_COUNT,
-    MIN_CONFLUENCE_SWING,
     UTC_OFFSET,
     BROKER_UTC_OFFSET,
     KILLZONES,
     LONDON_NY_KILLZONES,
     SESSION_RULES,
-    SESSION_SETTINGS,
     TREND_DAYS,
-    RANGING_DAYS,
 )
 MIN_CONFLUENCE_SCALP = 1  # Fallback local constant
 from src.analysis.analysis import (

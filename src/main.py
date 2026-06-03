@@ -25,11 +25,7 @@ from src.config import (
     UTC_OFFSET,
     KILLZONES,
     SESSION_RULES,
-    SESSION_SETTINGS,
-    MIN_CONFLUENCE_SCORE,
     MIN_RR,
-    TREND_DAYS,
-    RANGING_DAYS,
     MAX_SPREAD,
     NEWS_BLACKOUT_MINUTES,
     NEWS_SCHEDULE_FILE,
@@ -568,16 +564,13 @@ def run_engine():
                     )
 
                     # === ENTRY LOGIC (AGGRESSIVE & ALIGNED) ===
-                    session_min_conf = SESSION_SETTINGS.get(session, {}).get(
-                        "MIN_CONFLUENCE", MIN_CONFLUENCE_SCORE
-                    )
                     if (
                         side
                         and confluence >= 2 # Accept minimum score 2 initially
                         and signal_trackers[sym][side.split()[0]]["last_candle_time"]
                         != current_candle_time
                     ):
-                        from src.config import TREND_DAYS, RANGING_DAYS
+                        from src.config import TREND_DAYS
                         
                         # === ROBUST ANTI-OVERFITTING PROFILE ===
                         current_dow = get_wib_now().weekday()
@@ -597,8 +590,6 @@ def run_engine():
                         
                         if not is_valid_entry:
                             continue
-                            
-                        tier = "SWING" if confluence >= 3 else "SCALP"
 
                         # NEWS BLACKOUT VALIDATION
                         in_blackout, nt = is_news_blackout()
